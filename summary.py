@@ -434,6 +434,64 @@ def render_compact_summary(events, date_str):
     return "\n".join(output)
 
 
+def render_date_picker():
+    """Show an interactive date picker with compact summaries."""
+    dates = get_available_dates()
+
+    if not dates:
+        print("\n  ⚠️  No logs found. Start coding with Claude Code to generate activity logs!\n")
+        return None
+
+    print("\n  📅 Available Engineering Journals\n")
+    print("  ─" * 38)
+
+    for i, date_str in enumerate(dates[:15], 1):
+        events = load_logs(date_str)
+        if not events:
+            continue
+
+        projects = analyze_events(events)
+        total_created = sum(len(p["files_created"]) for p in projects.values())
+        total_modified = sum(len(p["files_modified"]) for p in projects.values())
+        total_tasks = sum(len(set(p["tasks_completed"])) for p in projects.values())
+
+        date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %b %d")
+        project_names = ", ".join(list(projects.keys())[:3])
+        if len(projects) > 3:
+            project_names += f" +{len(projects)-3}"
+
+        # Highlight today
+        is_today = date_str == datetime.now().strftime("%Y-%m-%d")
+        marker = "→" if is_today else " "
+        today_label = " (today)" if is_today else ""
+
+        print(f"  {marker} [{i:2}] {date_display}{today_label}")
+        print(f"        {len(projects)} project(s) | {total_created} created | {total_modified} modified | {total_tasks} tasks")
+        print(f"        {project_names}")
+        print()
+
+    if len(dates) > 15:
+        print(f"       ... and {len(dates) - 15} more dates (use --list to see all)\n")
+
+    print("  ─" * 38)
+    print("  Enter number to expand, or press Enter for today: ", end="")
+
+    try:
+        choice = input().strip()
+        if not choice:
+            return dates[0] if dates else None
+
+        idx = int(choice) - 1
+        if 0 <= idx < min(len(dates), 15):
+            return dates[idx]
+        else:
+            print("  Invalid selection.")
+            return None
+    except (ValueError, EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Claude Code Engineering Journal")
     parser.add_argument("--date", "-d", help="Date to summarize (YYYY-MM-DD)")
@@ -441,6 +499,7 @@ def main():
     parser.add_argument("--save", "-s", action="store_true", help="Save summary to file")
     parser.add_argument("--raw", "-r", action="store_true", help="Show raw log data")
     parser.add_argument("--compact", "-c", action="store_true", help="Compact quick-glance view")
+    parser.add_argument("--pick", "-p", action="store_true", help="Interactive date picker")
 
     args = parser.parse_args()
 
@@ -452,6 +511,19 @@ def main():
             projects = len(set(e.get("project", "") for e in events if e.get("project")))
             print(f"    {d}: {len(events)} events across {projects} project(s)")
         print()
+        return
+
+    # Interactive date picker
+    if args.pick:
+        date_str = render_date_picker()
+        if not date_str:
+            return
+        events = load_logs(date_str)
+        if args.compact:
+            print()
+            print(render_compact_summary(events, date_str))
+        else:
+            print(render_engineering_summary(events, date_str))
         return
 
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
