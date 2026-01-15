@@ -1,0 +1,11 @@
+# Personal logs - don't commit
+logs/
+summaries/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
