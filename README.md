@@ -49,8 +49,9 @@ Your `~/.claude/settings.json` includes:
 | Command | Description |
 |---------|-------------|
 | `/summary` | Today's engineering journal |
-| `/summary-history` | Browse past days |
-| `/summary-quick` | Compact view |
+| `/summary-pick` | Browse dates with stats, choose one to expand |
+| `/summary-history` | Browse past days (basic list) |
+| `/summary-quick` | Compact view of today |
 
 ### 3. Or run directly
 
@@ -58,8 +59,17 @@ Your `~/.claude/settings.json` includes:
 # Today's journal
 python3 ~/Desktop/cc-config/summary.py
 
+# Compact view of today
+python3 ~/Desktop/cc-config/summary.py --compact
+
+# Interactive date picker (choose by number)
+python3 ~/Desktop/cc-config/summary.py --pick
+
 # Specific date
 python3 ~/Desktop/cc-config/summary.py --date 2025-10-15
+
+# Specific date, compact view
+python3 ~/Desktop/cc-config/summary.py --date 2025-10-15 --compact
 
 # List all available dates
 python3 ~/Desktop/cc-config/summary.py --list
@@ -180,9 +190,10 @@ The hooks are defined in `~/.claude/settings.json`:
 ```
 
 Slash commands are in `~/.claude/commands/`:
-- `summary.md`
-- `summary-history.md`
-- `summary-quick.md`
+- `summary.md` — full journal
+- `summary-pick.md` — date picker with stats
+- `summary-history.md` — basic date list
+- `summary-quick.md` — compact view
 
 ## Why?
 
