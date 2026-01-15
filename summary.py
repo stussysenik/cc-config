@@ -387,12 +387,60 @@ def render_engineering_summary(events, date_str):
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def render_compact_summary(events, date_str):
+    """Generate a compact quick-glance summary."""
+    output = []
+
+    date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %b %d")
+
+    if not events:
+        output.append(f"📊 {date_display} — No activity logged")
+        return "\n".join(output)
+
+    projects = analyze_events(events)
+
+    total_created = sum(len(p["files_created"]) for p in projects.values())
+    total_modified = sum(len(p["files_modified"]) for p in projects.values())
+    total_completed = sum(len(set(p["tasks_completed"])) for p in projects.values())
+
+    # Header line
+    output.append(f"📊 {date_display} — {len(projects)} project(s) | {total_created} created | {total_modified} modified | {total_completed} tasks")
+    output.append("")
+
+    # Per-project one-liners
+    for name, data in sorted(projects.items(), key=lambda x: -len(x[1]["timeline"])):
+        if not data["timeline"]:
+            continue
+
+        start = min(data["timeline"])
+        end = max(data["timeline"])
+
+        # Build a brief description
+        parts = []
+        if data["files_created"]:
+            parts.append(f"{len(data['files_created'])} files")
+        if data["tasks_completed"]:
+            parts.append(f"{len(set(data['tasks_completed']))} tasks")
+        if data["commands"]:
+            cmd_types = set(c["action"] for c in data["commands"])
+            if "ran_tests" in cmd_types:
+                parts.append("tests")
+            if "built_project" in cmd_types:
+                parts.append("build")
+
+        desc = ", ".join(parts) if parts else "activity"
+        output.append(f"  📁 {name} [{start}→{end}]: {desc}")
+
+    return "\n".join(output)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Claude Code Engineering Journal")
     parser.add_argument("--date", "-d", help="Date to summarize (YYYY-MM-DD)")
     parser.add_argument("--list", "-l", action="store_true", help="List available dates")
     parser.add_argument("--save", "-s", action="store_true", help="Save summary to file")
     parser.add_argument("--raw", "-r", action="store_true", help="Show raw log data")
+    parser.add_argument("--compact", "-c", action="store_true", help="Compact quick-glance view")
 
     args = parser.parse_args()
 
@@ -412,6 +460,10 @@ def main():
     if args.raw:
         for e in events[-20:]:
             print(json.dumps(e, indent=2))
+        return
+
+    if args.compact:
+        print(render_compact_summary(events, date_str))
         return
 
     summary = render_engineering_summary(events, date_str)
