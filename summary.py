@@ -19,6 +19,9 @@ SUMMARIES_DIR = CONFIG_DIR / "summaries"
 SYNC_SCRIPT = CONFIG_DIR / "sync-native-logs.py"
 
 
+STATS_FILE = CONFIG_DIR / "logs" / ".stats.json"
+
+
 def auto_sync_native_logs():
     """Auto-sync native logs before generating summary."""
     if SYNC_SCRIPT.exists():
@@ -30,6 +33,60 @@ def auto_sync_native_logs():
             )
         except:
             pass  # Silently fail if sync has issues
+
+
+def load_usage_stats() -> dict:
+    """Load usage stats from sync script."""
+    if STATS_FILE.exists():
+        try:
+            with open(STATS_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+
+def render_usage_stats(date_str: str = None) -> str:
+    """Render usage statistics section."""
+    stats = load_usage_stats()
+    if not stats:
+        return ""
+
+    lines = []
+    lines.append("\n" + "─" * 60)
+    lines.append("💰 Usage Statistics")
+    lines.append("─" * 60)
+
+    # Today's stats if available
+    if date_str and date_str in stats.get('by_date', {}):
+        day_stats = stats['by_date'][date_str]
+        lines.append(f"  Today: ${day_stats['cost']:.2f} ({day_stats['requests']:,} requests)")
+
+    # Total stats
+    total_cost = stats.get('total_cost', 0)
+    total_tokens = stats.get('total_tokens', {})
+    input_t = total_tokens.get('input', 0)
+    output_t = total_tokens.get('output', 0)
+
+    lines.append(f"  Total: ${total_cost:.2f} | {(input_t + output_t):,} tokens")
+
+    # Model breakdown (compact)
+    by_model = stats.get('by_model', {})
+    if by_model:
+        model_parts = []
+        for model, data in sorted(by_model.items(), key=lambda x: -x[1]['cost']):
+            model_parts.append(f"{model}: ${data['cost']:.2f}")
+        lines.append(f"  Models: {' | '.join(model_parts)}")
+
+    # Recent days (last 3)
+    by_date = stats.get('by_date', {})
+    if by_date:
+        recent = sorted(by_date.keys(), reverse=True)[:3]
+        day_parts = [f"{d[-5:]}: ${by_date[d]['cost']:.2f}" for d in recent]
+        lines.append(f"  Recent: {' | '.join(day_parts)}")
+
+    lines.append("")
+    return "\n".join(lines)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ASCII ART
@@ -809,10 +866,12 @@ def main():
 
     if args.compact:
         print(render_compact_summary(events, date_str))
+        print(render_usage_stats(date_str))
         return
 
     summary = render_engineering_summary(events, date_str)
     print(summary)
+    print(render_usage_stats(date_str))
 
     if args.save:
         SUMMARIES_DIR.mkdir(exist_ok=True)
