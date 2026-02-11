@@ -46,8 +46,8 @@ def load_usage_stats() -> dict:
     return {}
 
 
-def render_usage_stats(date_str: str = None) -> str:
-    """Render usage statistics section."""
+def render_usage_stats(date_str: str = None, start_date: str = None, end_date: str = None) -> str:
+    """Render usage statistics section. Supports single date or date range."""
     stats = load_usage_stats()
     if not stats:
         return ""
@@ -57,9 +57,35 @@ def render_usage_stats(date_str: str = None) -> str:
     lines.append("💰 Usage Statistics")
     lines.append("─" * 60)
 
-    # Today's stats if available
-    if date_str and date_str in stats.get('by_date', {}):
-        day_stats = stats['by_date'][date_str]
+    by_date = stats.get('by_date', {})
+
+    # Date range stats
+    if start_date and end_date:
+        range_cost = 0.0
+        range_requests = 0
+        range_input = 0
+        range_output = 0
+        days_with_activity = 0
+
+        for d, d_stats in by_date.items():
+            if start_date <= d <= end_date:
+                range_cost += d_stats.get('cost', 0)
+                range_requests += d_stats.get('requests', 0)
+                range_input += d_stats.get('input', 0)
+                range_output += d_stats.get('output', 0)
+                days_with_activity += 1
+
+        lines.append(f"  Period: ${range_cost:.2f} ({range_requests:,} requests)")
+        lines.append(f"  Tokens: {(range_input + range_output):,} ({days_with_activity} days)")
+
+        # Daily average
+        if days_with_activity > 0:
+            avg_cost = range_cost / days_with_activity
+            lines.append(f"  Daily avg: ${avg_cost:.2f}/day")
+
+    # Single date stats
+    elif date_str and date_str in by_date:
+        day_stats = by_date[date_str]
         lines.append(f"  Today: ${day_stats['cost']:.2f} ({day_stats['requests']:,} requests)")
 
     # Total stats
@@ -78,12 +104,19 @@ def render_usage_stats(date_str: str = None) -> str:
             model_parts.append(f"{model}: ${data['cost']:.2f}")
         lines.append(f"  Models: {' | '.join(model_parts)}")
 
-    # Recent days (last 3)
-    by_date = stats.get('by_date', {})
-    if by_date:
-        recent = sorted(by_date.keys(), reverse=True)[:3]
-        day_parts = [f"{d[-5:]}: ${by_date[d]['cost']:.2f}" for d in recent]
-        lines.append(f"  Recent: {' | '.join(day_parts)}")
+    # Top projects (for range view)
+    if start_date and end_date:
+        by_project = stats.get('by_project', {})
+        if by_project:
+            top_projects = sorted(by_project.items(), key=lambda x: -x[1]['cost'])[:5]
+            proj_parts = [f"{p}: ${d['cost']:.2f}" for p, d in top_projects]
+            lines.append(f"  Top: {' | '.join(proj_parts[:3])}")
+    else:
+        # Recent days (last 3) for single day view
+        if by_date:
+            recent = sorted(by_date.keys(), reverse=True)[:3]
+            day_parts = [f"{d[-5:]}: ${by_date[d]['cost']:.2f}" for d in recent]
+            lines.append(f"  Recent: {' | '.join(day_parts)}")
 
     lines.append("")
     return "\n".join(lines)
@@ -854,6 +887,7 @@ def main():
             start_date, end_date = args.range
 
         print(render_range_summary(start_date, end_date))
+        print(render_usage_stats(start_date=start_date, end_date=end_date))
         return
 
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
