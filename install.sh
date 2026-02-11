@@ -1,83 +1,90 @@
 #!/bin/bash
+#
+# Claude Code Config Installer
+# Sets up /summary commands and syncs activity logs
+#
+# Usage (one-liner):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/stussysenik/cc-config/main/install.sh)
+#
+# Or after cloning:
+#   cd ~/Desktop/cc-config && ./install.sh
+#
+
 set -e
 
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║                                                                ║"
-echo "║                   🚀 cc-config Installation                    ║"
+echo "║              🚀 Claude Code Config Installer                   ║"
 echo "║                                                                ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 
+# Determine install location
 CC_CONFIG_DIR="$HOME/Desktop/cc-config"
 
+# Clone if running from curl (not already in repo)
+if [ ! -f "./sync-native-logs.py" ]; then
+    if [ ! -d "$CC_CONFIG_DIR" ]; then
+        echo "📦 Cloning cc-config..."
+        git clone https://github.com/stussysenik/cc-config.git "$CC_CONFIG_DIR"
+    else
+        echo "📦 Updating cc-config..."
+        cd "$CC_CONFIG_DIR" && git pull --ff-only || true
+    fi
+    cd "$CC_CONFIG_DIR"
+else
+    CC_CONFIG_DIR="$(pwd)"
+fi
+
+echo ""
+
 # 1. Install slash commands
-echo "📝 Installing slash commands..."
+echo "📝 Installing slash commands to ~/.claude/commands/..."
 COMMANDS_DIR="$HOME/.claude/commands"
 mkdir -p "$COMMANDS_DIR"
 
-cp "$CC_CONFIG_DIR/commands/"*.md "$COMMANDS_DIR/"
-echo "✅ Slash commands installed: /summary, /summary-pick, /summary-range, /summary-quick, /summary-history"
-echo ""
-
-# 2. Install activity logger hook
-echo "🔧 Installing activity logger hook..."
-python3 "$CC_CONFIG_DIR/merge-settings.py"
-echo ""
-
-# 3. Run backfill if needed
-if [ -f "$HOME/.claude/history.jsonl" ]; then
-    LOG_COUNT=$(ls "$CC_CONFIG_DIR/logs/"*.jsonl 2>/dev/null | wc -l | tr -d ' ')
-
-    if [ "$LOG_COUNT" -lt 5 ]; then
-        echo "📚 Backfilling history from ~/.claude/history.jsonl..."
-        echo ""
-        python3 "$CC_CONFIG_DIR/backfill-history.py"
-        echo ""
-    else
-        echo "✅ Log files already populated ($LOG_COUNT files)"
-        echo ""
+for cmd in "$CC_CONFIG_DIR/commands/"*.md; do
+    if [ -f "$cmd" ]; then
+        name=$(basename "$cmd" .md)
+        cp "$cmd" "$COMMANDS_DIR/"
+        echo "   ✓ /$name"
     fi
-else
-    echo "⚠️  No ~/.claude/history.jsonl found - skipping backfill"
-    echo "   Logs will be created as you use Claude Code"
-    echo ""
-fi
+done
 
-# 4. Verification
-echo "🔍 Verifying installation..."
 echo ""
 
-# Check slash commands
-CMD_COUNT=$(ls "$COMMANDS_DIR/summary"*.md 2>/dev/null | wc -l | tr -d ' ')
-if [ "$CMD_COUNT" -ge 4 ]; then
-    echo "✅ Slash commands: $CMD_COUNT installed"
-else
-    echo "⚠️  Only $CMD_COUNT slash commands found (expected 5+)"
-fi
+# 2. Sync native logs (no hooks needed!)
+echo "🔄 Syncing Claude Code activity logs..."
+echo "   (This reads directly from ~/.claude/projects/ - no hooks needed)"
+echo ""
 
-# Check hook
-if grep -q "activity-logger" "$HOME/.claude/settings.json" 2>/dev/null; then
-    echo "✅ Activity logger hook: configured"
-else
-    echo "⚠️  Activity logger hook: not found in settings.json"
-fi
+python3 "$CC_CONFIG_DIR/sync-native-logs.py" --reset
 
-# Check logs
-LOG_COUNT=$(ls "$CC_CONFIG_DIR/logs/"*.jsonl 2>/dev/null | wc -l | tr -d ' ')
-echo "✅ Log files: $LOG_COUNT days of history"
+echo ""
+
+# 3. Show usage stats
+echo "📊 Your Claude Code usage:"
+python3 "$CC_CONFIG_DIR/sync-native-logs.py" --stats
 
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║                   ✅ Installation Complete!                    ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "💡 Try these commands in any Claude Code session:"
+echo "💡 Available slash commands:"
 echo ""
-echo "   /summary          - Today's work"
-echo "   /summary-pick     - Browse all $LOG_COUNT days"
-echo "   /summary-range    - View date ranges (e.g. 'last week')"
-echo "   /summary-quick    - Quick glance at today"
+echo "   /summary            Today's engineering journal + costs"
+echo "   /summary-quick      Compact quick-glance view"
+echo "   /summary-range 7d   Last 7 days with period costs"
+echo "   /summary-range 30d  Last 30 days"
+echo "   /summary-pick       Browse all available dates"
+echo "   /summary-history    View historical summaries"
+echo "   /stats              Token usage & cost breakdown"
 echo ""
-echo "🎉 cc-config is now active globally for all projects!"
+echo "🔄 To update logs anytime:"
+echo "   python3 $CC_CONFIG_DIR/sync-native-logs.py"
+echo ""
+echo "💰 Your token usage is extracted from Claude's hidden logs!"
+echo "   Claude tracks everything but doesn't show you - now you can see it."
 echo ""
