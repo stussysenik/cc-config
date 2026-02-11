@@ -7,6 +7,7 @@ Generates narrative summaries of what you actually built.
 import json
 import os
 import sys
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
@@ -15,6 +16,20 @@ import argparse
 CONFIG_DIR = Path.home() / "Desktop" / "cc-config"
 LOGS_DIR = CONFIG_DIR / "logs"
 SUMMARIES_DIR = CONFIG_DIR / "summaries"
+SYNC_SCRIPT = CONFIG_DIR / "sync-native-logs.py"
+
+
+def auto_sync_native_logs():
+    """Auto-sync native logs before generating summary."""
+    if SYNC_SCRIPT.exists():
+        try:
+            subprocess.run(
+                ["python3", str(SYNC_SCRIPT), "--quiet"],
+                capture_output=True,
+                timeout=30
+            )
+        except:
+            pass  # Silently fail if sync has issues
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ASCII ART
@@ -69,14 +84,28 @@ def analyze_events(events):
         "commands": [],
         "research": [],
         "delegated": [],
+        "prompts": [],  # For backfilled data
         "timeline": [],
         "categories": set(),
+        "has_backfill": False,
     })
 
     for e in events:
         project = e.get("project", "unknown")
         action = e.get("action", "")
         ts = e.get("ts", "")
+        source = e.get("source", "")
+
+        # Handle backfilled events (from history.jsonl)
+        if source == "backfill" and action == "user_prompt":
+            projects[project]["prompts"].append({
+                "prompt": e.get("prompt", ""),
+                "time": ts,
+            })
+            projects[project]["has_backfill"] = True
+            if ts:
+                projects[project]["timeline"].append(ts)
+            continue
 
         if action == "created_file":
             projects[project]["files_created"].append({
@@ -150,10 +179,29 @@ def render_project_summary(name, data):
     else:
         time_span = "no activity"
 
+    # Show backfill indicator
+    source_label = " (from session history)" if data.get("has_backfill") else ""
+
     lines.append(f"")
     lines.append(f"┌{'─' * 76}┐")
     lines.append(f"│  📁 {name:<50} [{time_span:>17}] │")
+    if source_label:
+        lines.append(f"│  {source_label:<74} │")
     lines.append(f"└{'─' * 76}┘")
+
+    # For backfilled data, show prompts instead of detailed tool usage
+    if data.get("has_backfill"):
+        prompts = data["prompts"]
+        if prompts:
+            lines.append(f"")
+            lines.append(f"  📝 SESSION ACTIVITY:")
+            for p in prompts[:8]:
+                prompt_text = p["prompt"][:65] + "..." if len(p["prompt"]) > 65 else p["prompt"]
+                if prompt_text:
+                    lines.append(f"      • {prompt_text}")
+            if len(prompts) > 8:
+                lines.append(f"      ... and {len(prompts) - 8} more sessions")
+        return "\n".join(lines)
 
     # What was built
     files_created = data["files_created"]
@@ -384,6 +432,181 @@ def render_engineering_summary(events, date_str):
     return "\n".join(output)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DATE RANGE SUPPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_relative_range(relative_str):
+    """Parse relative date ranges like '7d', 'this-week', 'last-month'."""
+    today = datetime.now()
+
+    if relative_str.endswith('d'):
+        # Last N days
+        days = int(relative_str[:-1])
+        start = today - timedelta(days=days-1)
+        return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    elif relative_str in ('this-week', 'week'):
+        # This week (Mon-Sun)
+        start = today - timedelta(days=today.weekday())
+        return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    elif relative_str in ('last-week',):
+        # Last week
+        end = today - timedelta(days=today.weekday()+1)
+        start = end - timedelta(days=6)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    elif relative_str in ('this-month', 'month'):
+        # This month
+        start = today.replace(day=1)
+        return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    elif relative_str in ('last-month',):
+        # Last month
+        first_of_month = today.replace(day=1)
+        end = first_of_month - timedelta(days=1)
+        start = end.replace(day=1)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    else:
+        raise ValueError(f"Unknown relative range: {relative_str}")
+
+
+def load_date_range(start_date, end_date):
+    """Load all events in a date range."""
+    all_events = []
+
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    current = start
+    dates_loaded = []
+
+    while current <= end:
+        date_str = current.strftime("%Y-%m-%d")
+        events = load_logs(date_str)
+        if events:
+            all_events.extend(events)
+            dates_loaded.append(date_str)
+        current += timedelta(days=1)
+
+    return all_events, dates_loaded
+
+
+def render_range_summary(start_date, end_date):
+    """Generate a summary for a date range."""
+    output = []
+
+    # Load all events in range
+    all_events, dates_loaded = load_date_range(start_date, end_date)
+
+    if not all_events:
+        output.append(f"\n  ⚠️  No activity logged between {start_date} and {end_date}\n")
+        return "\n".join(output)
+
+    # Calculate span
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    days_span = (end_dt - start_dt).days + 1
+
+    # Format header
+    start_display = start_dt.strftime("%b %d")
+    end_display = end_dt.strftime("%b %d, %Y")
+
+    output.append("")
+    output.append("┌" + "─" * 76 + "┐")
+    title = f"📊 WORK SUMMARY: {start_display.upper()} → {end_display.upper()} ({days_span} DAYS)"
+    padding = (78 - len(title)) // 2
+    output.append("│" + " " * padding + title + " " * (78 - padding - len(title)) + "│")
+    output.append("├" + "─" * 76 + "┤")
+
+    # Analyze all events
+    projects = analyze_events(all_events)
+
+    # Overall stats
+    total_projects = len(projects)
+    days_active = len(dates_loaded)
+    total_sessions = len(all_events)
+
+    stats = f"│  {total_projects} project(s)  •  {days_active} days active  •  {total_sessions} sessions"
+    stats = stats + " " * (77 - len(stats)) + "│"
+    output.append(stats)
+    output.append("└" + "─" * 76 + "┘")
+
+    # Per-project summaries
+    for name, data in sorted(projects.items(), key=lambda x: -len(x[1]["timeline"])):
+        if not data["timeline"]:
+            continue
+
+        output.append("")
+        output.append(f"  📁 {name:<60} [{len(set([t[:10] for t in data['timeline']]))} days active]")
+
+        # Show work done (adapt to backfilled vs detailed)
+        if data.get("has_backfill"):
+            prompts = data["prompts"]
+            if prompts and len(prompts) <= 5:
+                for p in prompts[:5]:
+                    prompt_text = p["prompt"][:60] + "..." if len(p["prompt"]) > 60 else p["prompt"]
+                    if prompt_text:
+                        output.append(f"      📝 {prompt_text}")
+            elif prompts:
+                output.append(f"      📝 {len(prompts)} sessions")
+        else:
+            # Detailed stats
+            if data["files_created"]:
+                output.append(f"      🏗️  Created {len(data['files_created'])} files")
+            if data["files_modified"]:
+                unique_modified = len(set(f["file"] for f in data["files_modified"]))
+                output.append(f"      ✏️  Modified {unique_modified} files")
+            if data["commands"]:
+                # Group commands by type
+                cmd_types = defaultdict(int)
+                for c in data["commands"]:
+                    cmd_types[c["action"]] += 1
+
+                for action, count in cmd_types.items():
+                    icon = {"ran_tests": "🧪", "built_project": "🔨", "committed_code": "💾"}.get(action, "▶️")
+                    label = action.replace("_", " ").title()
+                    output.append(f"      {icon} {label} ({count}x)")
+
+    # Daily breakdown
+    if days_active > 1:
+        output.append("")
+        output.append("  Daily breakdown:")
+
+        # Count events per date
+        events_by_date = defaultdict(int)
+        for e in all_events:
+            # Extract date from various timestamp formats
+            ts = e.get("ts", "")
+            if ts and len(ts) >= 5:  # HH:MM format
+                # We need to track which log file this came from
+                # For now, count all events
+                pass
+
+        # Load each date individually for accurate counts
+        for date_str in dates_loaded[:10]:  # Show max 10 days
+            events = load_logs(date_str)
+            count = len(events)
+
+            # Format date
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            date_display = dt.strftime("%b %d")
+
+            # Activity bar
+            max_count = max(len(load_logs(d)) for d in dates_loaded)
+            bar_len = int((count / max(max_count, 1)) * 20)
+            bar = "█" * bar_len + "░" * (20 - bar_len)
+
+            output.append(f"    {date_display} │{bar}│ {count:3} sessions")
+
+        if len(dates_loaded) > 10:
+            output.append(f"    ... and {len(dates_loaded) - 10} more days")
+
+    return "\n".join(output)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -501,8 +724,13 @@ def main():
     parser.add_argument("--compact", "-c", action="store_true", help="Compact quick-glance view")
     parser.add_argument("--pick", "-p", action="store_true", help="Interactive date picker")
     parser.add_argument("--pick-list", action="store_true", help="Show date picker list (non-interactive)")
+    parser.add_argument("--range", nargs=2, metavar=("START", "END"), help="Date range (YYYY-MM-DD YYYY-MM-DD)")
+    parser.add_argument("--range-relative", help="Relative range (7d, this-week, last-month)")
 
     args = parser.parse_args()
+
+    # Auto-sync native logs before any operation
+    auto_sync_native_logs()
 
     if args.list:
         dates = get_available_dates()
@@ -555,6 +783,20 @@ def main():
             print()
         if len(dates) > 15:
             print(f"       ... and {len(dates) - 15} more dates\n")
+        return
+
+    # Date range summary
+    if args.range or args.range_relative:
+        if args.range_relative:
+            try:
+                start_date, end_date = parse_relative_range(args.range_relative)
+            except ValueError as e:
+                print(f"\n  ❌ Error: {e}\n")
+                return
+        else:
+            start_date, end_date = args.range
+
+        print(render_range_summary(start_date, end_date))
         return
 
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
