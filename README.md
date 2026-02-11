@@ -61,7 +61,10 @@ After installation, use these in any Claude Code session:
 | `/summary-range 30d` | Last 30 days |
 | `/summary-range last-month` | Previous month |
 | `/summary-pick` | Browse all available dates |
-| `/stats` | Full token/cost breakdown |
+| `/stats` | Full token/cost/cache breakdown |
+| `/stats 7d` | Last 7 days statistics |
+| `/stats 30d` | Last 30 days statistics |
+| `/stats last-month` | Previous month statistics |
 
 ## Sample Output
 
@@ -95,24 +98,43 @@ After installation, use these in any Claude Code session:
 
 ### `/stats`
 ```
-📊 Claude Code Usage Statistics
-==================================================
+════════════════════════════════════════════════════════════
+  📊 CLAUDE CODE USAGE STATISTICS
+════════════════════════════════════════════════════════════
 
-💰 Total Cost: $114.90
-📝 Total Tokens: 9,357,145
-   Input:  8,613,301
-   Output: 743,844
-   Cache:  3,671,035,677 read / 272,818,421 write
+📅 Period: All Time
 
-📈 By Model:
-   opus: $102.18 (35152 requests)
-   haiku: $10.28 (7562 requests)
-   sonnet: $2.45 (4886 requests)
+────────────────────────────────────────────────────────────
+  💰 COST SUMMARY
+────────────────────────────────────────────────────────────
+  Actual Cost:      $    114.90
+  Without Caching:  $    745.82
+  Cache Savings:    $    630.92  💚 (85% saved)
 
-📁 Top Projects by Cost:
-   mymind-clone-web: $23.38
-   v0-clone: $20.35
-   clean-writer: $17.65
+────────────────────────────────────────────────────────────
+  📝 TOKEN BREAKDOWN
+────────────────────────────────────────────────────────────
+  Total Tokens:        9,358,700
+    Input:             8,614,499
+    Output:              744,201
+  Cache:
+    Read:          3,687,882,565  (90% cheaper)
+    Write:           273,748,132  (25% premium)
+
+────────────────────────────────────────────────────────────
+  🎯 SUBSCRIPTION VALUE COMPARISON
+────────────────────────────────────────────────────────────
+  Claude Pro ($20/mo):
+    API Value:  $745.82 for $20/mo = 37.3x value ✨
+  Claude Max 5x ($100/mo):
+    API Value:  $745.82 for $100/mo = 7.5x value ✨
+
+────────────────────────────────────────────────────────────
+  📈 BY MODEL (all-time)
+────────────────────────────────────────────────────────────
+  opus         $  102.18  (35,152 reqs) (saved $512.87)
+  haiku        $   10.28  (7,562 reqs) (saved $77.37)
+  sonnet       $    2.45  (4,886 reqs) (saved $40.68)
 ```
 
 ## How It Works
@@ -196,11 +218,38 @@ This tool works on any machine with Claude Code activity:
 
 The sync script auto-discovers all projects in `~/.claude/projects/`.
 
+## Cache Savings & Pricing
+
+### How Much You Save
+
+Claude Code uses **prompt caching** aggressively. Cache reads are **90% cheaper** than regular input tokens:
+
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|-------|--------|------------|-------------|
+| Opus | $15/1M | $75/1M | $1.50/1M | $18.75/1M |
+| Sonnet | $3/1M | $15/1M | $0.30/1M | $3.75/1M |
+| Haiku | $0.80/1M | $4/1M | $0.08/1M | $1.00/1M |
+
+Most users save **80-90%** compared to non-cached API pricing.
+
+### Subscription Value
+
+See how much value you're getting from your subscription:
+
+```
+🎯 SUBSCRIPTION VALUE COMPARISON
+────────────────────────────────────────
+Claude Pro ($20/mo):
+  API Value: $745.82 for $20/mo = 37.3x value ✨
+```
+
+The "API Value" is what your usage would cost at API rates (without caching). This shows the value of your subscription.
+
 ## Why Claude Hides This
 
 Claude Code logs detailed token usage for every request but doesn't expose it in the UI. This data includes:
 - Input/output token counts
-- Cache hit/miss ratios
+- Cache hit/miss ratios (the big money saver)
 - Which model handled each request
 - Request IDs for debugging
 

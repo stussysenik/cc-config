@@ -36,13 +36,26 @@ STATS_FILE = CONFIG_DIR / "logs" / ".stats.json"
 
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Cost estimates per 1M tokens (as of 2024)
+# Anthropic API Pricing per 1M tokens (as of Feb 2025)
+# Source: https://www.anthropic.com/pricing
+# Cache reads are 90% cheaper, cache writes are 25% more expensive
 COST_PER_1M = {
-    "claude-opus-4-5-20251101": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
-    "claude-haiku-3-5-20241022": {"input": 0.80, "output": 4.00},
-    # Fallback for unknown models
-    "default": {"input": 3.00, "output": 15.00},
+    "claude-opus-4-5-20251101": {
+        "input": 15.00, "output": 75.00,
+        "cache_read": 1.50, "cache_write": 18.75  # 90% off / 25% more
+    },
+    "claude-sonnet-4-20250514": {
+        "input": 3.00, "output": 15.00,
+        "cache_read": 0.30, "cache_write": 3.75
+    },
+    "claude-haiku-3-5-20241022": {
+        "input": 0.80, "output": 4.00,
+        "cache_read": 0.08, "cache_write": 1.00
+    },
+    "default": {
+        "input": 3.00, "output": 15.00,
+        "cache_read": 0.30, "cache_write": 3.75
+    },
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,12 +116,31 @@ def extract_model_name(model: str) -> str:
     return model.split("-")[0] if "-" in model else model
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Calculate estimated cost in USD."""
+def calculate_cost(model: str, input_tokens: int, output_tokens: int,
+                   cache_read: int = 0, cache_write: int = 0) -> dict:
+    """
+    Calculate estimated cost in USD with cache breakdown.
+    Returns dict with actual cost and what it would have cost without cache.
+    """
     costs = COST_PER_1M.get(model, COST_PER_1M["default"])
+
     input_cost = (input_tokens / 1_000_000) * costs["input"]
     output_cost = (output_tokens / 1_000_000) * costs["output"]
-    return round(input_cost + output_cost, 4)
+    cache_read_cost = (cache_read / 1_000_000) * costs["cache_read"]
+    cache_write_cost = (cache_write / 1_000_000) * costs["cache_write"]
+
+    actual_cost = input_cost + output_cost + cache_read_cost + cache_write_cost
+
+    # What it would have cost if cache reads were full price
+    full_price_cache = (cache_read / 1_000_000) * costs["input"]
+    cost_without_cache = input_cost + output_cost + full_price_cache + cache_write_cost
+    cache_savings = cost_without_cache - actual_cost
+
+    return {
+        "actual": round(actual_cost, 4),
+        "without_cache": round(cost_without_cache, 4),
+        "savings": round(cache_savings, 4),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -143,6 +175,8 @@ def load_stats() -> dict:
     return {
         "total_tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
         "total_cost": 0.0,
+        "total_cost_without_cache": 0.0,
+        "total_cache_savings": 0.0,
         "by_date": {},
         "by_model": {},
         "by_project": {},
@@ -243,8 +277,11 @@ def parse_log_entry(data: dict) -> tuple[list[dict], dict]:
             cache_write = usage.get('cache_creation_input_tokens', 0)
 
             if input_tokens or output_tokens:
+                cost_data = calculate_cost(model, input_tokens, output_tokens,
+                                          cache_read, cache_write)
                 token_data = {
                     "date": date,
+                    "time": time,
                     "project": project,
                     "model": model,
                     "model_short": extract_model_name(model),
@@ -252,7 +289,9 @@ def parse_log_entry(data: dict) -> tuple[list[dict], dict]:
                     "output_tokens": output_tokens,
                     "cache_read": cache_read,
                     "cache_write": cache_write,
-                    "cost": calculate_cost(model, input_tokens, output_tokens),
+                    "cost": cost_data["actual"],
+                    "cost_without_cache": cost_data["without_cache"],
+                    "cache_savings": cost_data["savings"],
                 }
 
         # Parse tool uses
@@ -388,6 +427,12 @@ def write_events_by_date(events: list[dict]):
 
 def update_stats(stats: dict, token_records: list[dict]):
     """Update cumulative stats with new token data."""
+    # Ensure new fields exist (for backwards compatibility)
+    if 'total_cost_without_cache' not in stats:
+        stats['total_cost_without_cache'] = 0.0
+    if 'total_cache_savings' not in stats:
+        stats['total_cache_savings'] = 0.0
+
     for record in token_records:
         date = record['date']
         project = record['project']
@@ -399,36 +444,45 @@ def update_stats(stats: dict, token_records: list[dict]):
         stats['total_tokens']['cache_read'] += record['cache_read']
         stats['total_tokens']['cache_write'] += record['cache_write']
         stats['total_cost'] += record['cost']
+        stats['total_cost_without_cache'] += record.get('cost_without_cache', record['cost'])
+        stats['total_cache_savings'] += record.get('cache_savings', 0)
 
         # By date
         if date not in stats['by_date']:
             stats['by_date'][date] = {
-                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0
+                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0,
+                'cache_savings': 0.0, 'cost_without_cache': 0.0
             }
         stats['by_date'][date]['input'] += record['input_tokens']
         stats['by_date'][date]['output'] += record['output_tokens']
         stats['by_date'][date]['cost'] += record['cost']
         stats['by_date'][date]['requests'] += 1
+        stats['by_date'][date]['cache_savings'] = stats['by_date'][date].get('cache_savings', 0) + record.get('cache_savings', 0)
+        stats['by_date'][date]['cost_without_cache'] = stats['by_date'][date].get('cost_without_cache', 0) + record.get('cost_without_cache', record['cost'])
 
         # By model
         if model not in stats['by_model']:
             stats['by_model'][model] = {
-                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0
+                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0,
+                'cache_savings': 0.0
             }
         stats['by_model'][model]['input'] += record['input_tokens']
         stats['by_model'][model]['output'] += record['output_tokens']
         stats['by_model'][model]['cost'] += record['cost']
         stats['by_model'][model]['requests'] += 1
+        stats['by_model'][model]['cache_savings'] = stats['by_model'][model].get('cache_savings', 0) + record.get('cache_savings', 0)
 
         # By project
         if project not in stats['by_project']:
             stats['by_project'][project] = {
-                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0
+                'input': 0, 'output': 0, 'cost': 0.0, 'requests': 0,
+                'cache_savings': 0.0
             }
         stats['by_project'][project]['input'] += record['input_tokens']
         stats['by_project'][project]['output'] += record['output_tokens']
         stats['by_project'][project]['cost'] += record['cost']
         stats['by_project'][project]['requests'] += 1
+        stats['by_project'][project]['cache_savings'] = stats['by_project'][project].get('cache_savings', 0) + record.get('cache_savings', 0)
 
     return stats
 
@@ -437,38 +491,193 @@ def update_stats(stats: dict, token_records: list[dict]):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def parse_date_range(range_arg: str) -> tuple[str, str]:
+    """Parse date range argument like '7d', '30d', 'last-month', 'this-month'."""
+    from datetime import timedelta
+    today = datetime.now()
+
+    if range_arg.endswith('d'):
+        days = int(range_arg[:-1])
+        start = (today - timedelta(days=days)).strftime('%Y-%m-%d')
+        end = today.strftime('%Y-%m-%d')
+    elif range_arg == 'last-month':
+        first_of_month = today.replace(day=1)
+        last_month_end = first_of_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        start = last_month_start.strftime('%Y-%m-%d')
+        end = last_month_end.strftime('%Y-%m-%d')
+    elif range_arg == 'this-month':
+        start = today.replace(day=1).strftime('%Y-%m-%d')
+        end = today.strftime('%Y-%m-%d')
+    elif range_arg == 'all':
+        return None, None
+    else:
+        # Assume YYYY-MM-DD format
+        start = range_arg
+        end = range_arg
+    return start, end
+
+
+def filter_stats_by_date(stats: dict, start_date: str, end_date: str) -> dict:
+    """Filter stats to only include dates in range."""
+    filtered = {
+        "total_tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+        "total_cost": 0.0,
+        "total_cost_without_cache": 0.0,
+        "total_cache_savings": 0.0,
+        "by_date": {},
+        "by_model": {},
+        "by_project": {},
+        "days_count": 0,
+    }
+
+    for date, data in stats.get('by_date', {}).items():
+        if start_date and date < start_date:
+            continue
+        if end_date and date > end_date:
+            continue
+
+        filtered['by_date'][date] = data
+        filtered['total_tokens']['input'] += data.get('input', 0)
+        filtered['total_tokens']['output'] += data.get('output', 0)
+        filtered['total_cost'] += data.get('cost', 0)
+        filtered['total_cost_without_cache'] += data.get('cost_without_cache', data.get('cost', 0))
+        filtered['total_cache_savings'] += data.get('cache_savings', 0)
+        filtered['days_count'] += 1
+
+    return filtered
+
+
+def show_stats(stats: dict, range_arg: str = None):
+    """Display stats with optional date range filtering."""
+    # Subscription tiers for comparison
+    SUBSCRIPTION_TIERS = {
+        "Pro": {"price": 20, "name": "Claude Pro ($20/mo)"},
+        "Max5": {"price": 100, "name": "Claude Max 5x ($100/mo)"},
+        "Max20": {"price": 200, "name": "Claude Max 20x ($200/mo)"},
+    }
+
+    print("\n" + "═" * 60)
+    print("  📊 CLAUDE CODE USAGE STATISTICS")
+    print("═" * 60)
+
+    # Filter by date range if specified
+    if range_arg:
+        start_date, end_date = parse_date_range(range_arg)
+        if start_date:
+            filtered = filter_stats_by_date(stats, start_date, end_date)
+            print(f"\n📅 Period: {start_date} → {end_date} ({filtered['days_count']} days)")
+            display_stats = filtered
+        else:
+            display_stats = stats
+            print(f"\n📅 Period: All Time")
+    else:
+        display_stats = stats
+        print(f"\n📅 Period: All Time")
+
+    total_cost = display_stats.get('total_cost', 0)
+    total_cost_without_cache = display_stats.get('total_cost_without_cache', total_cost)
+    total_savings = display_stats.get('total_cache_savings', 0)
+    total_tokens = display_stats.get('total_tokens', {})
+
+    # Cost Summary
+    print("\n" + "─" * 60)
+    print("  💰 COST SUMMARY")
+    print("─" * 60)
+    print(f"  Actual Cost:      ${total_cost:>10.2f}")
+    if total_savings > 0:
+        print(f"  Without Caching:  ${total_cost_without_cache:>10.2f}")
+        print(f"  Cache Savings:    ${total_savings:>10.2f}  💚 ({total_savings/total_cost_without_cache*100:.0f}% saved)" if total_cost_without_cache > 0 else "")
+
+    # Token Breakdown
+    print("\n" + "─" * 60)
+    print("  📝 TOKEN BREAKDOWN")
+    print("─" * 60)
+    input_tokens = total_tokens.get('input', 0)
+    output_tokens = total_tokens.get('output', 0)
+    cache_read = total_tokens.get('cache_read', 0)
+    cache_write = total_tokens.get('cache_write', 0)
+    total = input_tokens + output_tokens
+
+    print(f"  Total Tokens:  {total:>15,}")
+    print(f"    Input:       {input_tokens:>15,}")
+    print(f"    Output:      {output_tokens:>15,}")
+    if cache_read or cache_write:
+        print(f"  Cache:")
+        print(f"    Read:        {cache_read:>15,}  (90% cheaper)")
+        print(f"    Write:       {cache_write:>15,}  (25% premium)")
+
+    # Subscription Value Comparison
+    print("\n" + "─" * 60)
+    print("  🎯 SUBSCRIPTION VALUE COMPARISON")
+    print("─" * 60)
+    api_value = total_cost_without_cache if total_cost_without_cache > total_cost else total_cost
+
+    for tier_key, tier in SUBSCRIPTION_TIERS.items():
+        price = tier['price']
+        name = tier['name']
+        if api_value >= price:
+            roi = api_value / price
+            print(f"  {name}:")
+            print(f"    API Value:  ${api_value:.2f} for ${price}/mo = {roi:.1f}x value ✨")
+        else:
+            print(f"  {name}:")
+            print(f"    API Value:  ${api_value:.2f} (under ${price} tier)")
+
+    # By Model (always show all-time for context)
+    print("\n" + "─" * 60)
+    print("  📈 BY MODEL (all-time)")
+    print("─" * 60)
+    for model, data in sorted(stats.get('by_model', {}).items(), key=lambda x: -x[1]['cost']):
+        savings = data.get('cache_savings', 0)
+        savings_str = f" (saved ${savings:.2f})" if savings > 0 else ""
+        print(f"  {model:12} ${data['cost']:>8.2f}  ({data['requests']:,} reqs){savings_str}")
+
+    # Top Projects (always show all-time for context)
+    print("\n" + "─" * 60)
+    print("  📁 TOP PROJECTS (all-time)")
+    print("─" * 60)
+    for project, data in sorted(stats.get('by_project', {}).items(), key=lambda x: -x[1]['cost'])[:8]:
+        savings = data.get('cache_savings', 0)
+        savings_str = f" (saved ${savings:.2f})" if savings > 0 else ""
+        print(f"  {project[:25]:25} ${data['cost']:>8.2f}{savings_str}")
+
+    # Recent Activity
+    print("\n" + "─" * 60)
+    print("  📅 RECENT ACTIVITY")
+    print("─" * 60)
+    dates = sorted(display_stats.get('by_date', {}).keys(), reverse=True)[:10]
+    for date in dates:
+        data = display_stats['by_date'][date]
+        savings = data.get('cache_savings', 0)
+        savings_str = f" 💚${savings:.2f}" if savings > 0 else ""
+        print(f"  {date}  ${data['cost']:>7.2f}  ({data['requests']:>4} reqs){savings_str}")
+
+    # Daily Average
+    if range_arg:
+        days = filtered.get('days_count', 1)
+        if days > 1:
+            daily_avg = total_cost / days
+            print(f"\n  📊 Daily Average: ${daily_avg:.2f}/day over {days} days")
+
+    print("\n" + "═" * 60 + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Sync Claude native logs to cc-config format')
     parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode')
     parser.add_argument('--reset', action='store_true', help='Reset sync state and resync all')
-    parser.add_argument('--stats', action='store_true', help='Show token/cost stats')
+    parser.add_argument('--stats', nargs='?', const='all', default=None,
+                        help='Show token/cost stats. Optional: 7d, 30d, last-month, this-month, or YYYY-MM-DD')
     args = parser.parse_args()
 
     log = lambda *a: None if args.quiet else print(*a)
 
     # Stats only mode
-    if args.stats:
+    if args.stats is not None:
         stats = load_stats()
-        print("\n📊 Claude Code Usage Statistics")
-        print("=" * 50)
-        print(f"\n💰 Total Cost: ${stats['total_cost']:.2f}")
-        print(f"📝 Total Tokens: {stats['total_tokens']['input'] + stats['total_tokens']['output']:,}")
-        print(f"   Input:  {stats['total_tokens']['input']:,}")
-        print(f"   Output: {stats['total_tokens']['output']:,}")
-        print(f"   Cache:  {stats['total_tokens']['cache_read']:,} read / {stats['total_tokens']['cache_write']:,} write")
-
-        print(f"\n📈 By Model:")
-        for model, data in sorted(stats.get('by_model', {}).items(), key=lambda x: -x[1]['cost']):
-            print(f"   {model}: ${data['cost']:.2f} ({data['requests']} requests)")
-
-        print(f"\n📁 Top Projects by Cost:")
-        for project, data in sorted(stats.get('by_project', {}).items(), key=lambda x: -x[1]['cost'])[:10]:
-            print(f"   {project}: ${data['cost']:.2f}")
-
-        print(f"\n📅 Recent Days:")
-        for date in sorted(stats.get('by_date', {}).keys(), reverse=True)[:7]:
-            data = stats['by_date'][date]
-            print(f"   {date}: ${data['cost']:.2f} ({data['requests']} requests)")
+        range_arg = None if args.stats == 'all' else args.stats
+        show_stats(stats, range_arg)
         return
 
     log("🔄 Claude Code Native Log Sync v2")
@@ -480,6 +689,8 @@ def main():
         stats = {
             "total_tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
             "total_cost": 0.0,
+            "total_cost_without_cache": 0.0,
+            "total_cache_savings": 0.0,
             "by_date": {},
             "by_model": {},
             "by_project": {},
