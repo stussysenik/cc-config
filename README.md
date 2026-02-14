@@ -55,7 +55,8 @@ After installation, use these in any Claude Code session:
 
 | Command | What It Shows |
 |---------|---------------|
-| `/summary` | Today's engineering journal + costs |
+| `/summary` | Quick dev journal — what shipped, vibes, week chart |
+| `/summary --full` | Verbose output — file lists, task details, top prompts, principles |
 | `/summary-quick` | Compact quick-glance view |
 | `/summary-range 7d` | Last 7 days with period costs |
 | `/summary-range 30d` | Last 30 days |
@@ -68,7 +69,42 @@ After installation, use these in any Claude Code session:
 
 ## Sample Output
 
-### `/summary`
+### `/summary` (default — quick journal)
+```
+  cc — Sat Feb 14 · 20h · 8 projects · $97
+
+  SHIPPED ═════════════════════════════════════════════
+
+  envelope-exa-experiment               03:05 → 21:24
+  [feature/exa-integration]
+  Feature Flags & Config, Safety Guardrails
+  Storybook Setup, Search Provider Adapter
+  DSPy Search Sidecar, Sidechain Enhancement
+  → 14/15 tasks · 43 test runs · 14 agents
+
+  senik                                 01:20 → 20:28
+  FX Chain presets (4), Track templates (5)
+  Session templates, Documentation (2)
+  → 8/8 tasks
+
+  + 5 smaller sessions (envelope, cc-config, dspy-search +2)
+
+  VIBES ═══════════════════════════════════════════════
+
+  Energy    ████████████████████░░  marathon (20h span)
+  Focus     scattered across 8 projects, high completion
+  Highlight envelope-exa-experiment — Test suites + API layer
+  Method    research-first (675 reads), TDD (43 test runs)
+  Cost      $97 · opus $92 / haiku $25
+
+  WEEK ═════════════════════════════════════════════════
+
+    Fri │███████░░░░░░░░░░░░░│  47
+  → Sat │████████████████████│ 249
+  🔥 2-day streak
+```
+
+### `/summary --full` (verbose)
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                             ☕ TODAY'S SESSION                              │
@@ -77,35 +113,17 @@ After installation, use these in any Claude Code session:
 │  5 project(s) delivered · 55 files built · 19 tasks completed              │
 └────────────────────────────────────────────────────────────────────────────┘
 
-  📖 THE ARC:
-  01:20  senik — FX Chain presets + Track templates + 3 more
-  02:37  envelope — OpenSpec artifacts + Documentation
-  03:05  envelope-exa-experiment — Test suites + API layer + 6 more
-
-  💬 "could you help me setup the reaper ideal for fred again.."
-
   🎯 DELIVERED:
       FX Chain presets — 4 files (Vocal Chain, Sidechain Pump, Lo-Fi Texture, Space)
       Track templates — 5 files
-      Session templates — Minimalist Session.RPP
 
   ✅ ALL 8 TASKS COMPLETED
   🔬 Research-driven — 211 investigations before building
-  ⚡ Parallelized work — delegated to 7 agents
 
-┌──────────────────────────────────────────────────────────────────┐
-│               🧠 TOP PROMPTS BY IMPACT                           │
-└──────────────────────────────────────────────────────────────────┘
-  #1  [01:43] "Design a detailed, step-by-step implementation plan..."
-      → 13 files · 16 tasks · 26 actions  (impact: 145)
-
-┌──────────────────────────────────────────────────────────────────┐
-│            🧬 TOP ENGINEERING PRINCIPLES APPLIED                  │
-└──────────────────────────────────────────────────────────────────┘
+  🧬 TOP ENGINEERING PRINCIPLES APPLIED
   1. Parallel Agent Delegation
      PRINCIPLE: Decompose large tasks into independent subtasks
      TODAY:     Delegated 15 tasks — explored, built, validated in parallel
-     EXTEND:    Any time you have N independent subtasks, spawn N workers.
 ```
 
 ### `/summary-range 14d`
@@ -190,8 +208,11 @@ This tool:
 ## CLI Usage
 
 ```bash
-# Today's journal
+# Today's journal (quick dev-first format)
 python3 ~/Desktop/cc-config/summary.py
+
+# Full verbose output (file lists, tasks, prompts, principles)
+python3 ~/Desktop/cc-config/summary.py --full
 
 # Compact view
 python3 ~/Desktop/cc-config/summary.py --compact

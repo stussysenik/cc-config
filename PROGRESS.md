@@ -1,5 +1,33 @@
 # Progress Log
 
+## 2026-02-14: Dev-First Journal Redesign
+
+### Problem
+The default `/summary` output was ~250 lines for a heavy day — ASCII art banner, box-drawn sections, full file lists, full task lists, academic "Engineering Principles" explanations, and "Friction & Slumps" framing. Too verbose for a quick end-of-day scan.
+
+### Solution
+New default journal mode (~45 lines) focused on product value, dev happiness, and DX:
+- **One-line header**: date, duration, projects, cost
+- **SHIPPED section**: product descriptions per project (smart task-name cleaning strips procedural prefixes, falls through to deliverable groups when tasks are too granular)
+- **VIBES section**: energy bar, focus level, highlight, method keywords, cost
+- **WEEK chart**: slim bars + streak, no box header
+- **Project ranking**: top 4 expanded, rest collapsed into one line
+
+### New functions
+- `render_journal()` — new default renderer
+- `generate_product_description()` — turns tasks/deliverables into prose
+- `compute_vibes()` — energy, focus, highlight, method, cost analysis
+- `rank_projects()` — substance scoring and expand/collapse
+- `generate_metrics_line()` — compact per-project metrics
+- `render_week_slim()` — slim week chart without box header
+- `_clean_task_name()` — strips Implement/Create/Verify prefixes, task number suffixes
+- `_truncate_word()` — word-boundary-aware truncation
+
+### Old output preserved
+- `render_engineering_summary()` renamed to `render_full_summary()`
+- Available via `--full` flag
+- All existing modes (--compact, --range, --prompt, --pick) unchanged
+
 ## 2026-02-14: Narrative Journal + Prompt Analytics + Engineering Principles
 
 ### Narrative Engine

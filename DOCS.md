@@ -3,10 +3,11 @@
 ## Overview
 
 This tool extracts hidden usage data from Claude Code's native logs and presents it as:
-- **Narrative engineering journals** — coffee-chat-style summaries of what you built
+- **Dev-first journal** — quick, scannable summary of what shipped (default mode)
+- **Vibes dashboard** — energy, focus, highlight, method, cost at a glance
+- **Full narrative mode** — verbose output with file lists, task details, top prompts, engineering principles (`--full`)
 - **Deliverable grouping** — files organized by purpose (FX presets, API layer, Test suites)
 - **Prompt impact leaderboard** — top 5 most productive prompts with NLP keyword analysis
-- **Session insights** — most expensive prompt, friction/slumps, engineering principles learned
 - **Token & cost tracking** — usage estimates, model breakdown, cache savings
 - **Subscription value comparison** — how much value you're getting vs API pricing
 
@@ -46,8 +47,17 @@ Compare your API-equivalent usage to subscription tiers:
 
 ## Commands Reference
 
-### `/summary`
-Today's narrative engineering journal.
+### `/summary` (default — quick journal)
+Dev-first journal focused on what shipped.
+
+Output includes:
+- **Header** — date, duration, project count, cost (one line)
+- **SHIPPED** — top projects with product descriptions and metrics (tasks, test runs, agents, commits)
+- **VIBES** — energy bar, focus level, highlight, method keywords, cost breakdown
+- **WEEK** — slim activity bar chart with streak tracking
+
+### `/summary --full` (verbose)
+Full narrative output with all details.
 
 Output includes:
 - **TODAY'S SESSION** — time span, project count, total files + tasks
@@ -110,7 +120,8 @@ python3 sync-native-logs.py --stats 7d  # 7-day stats
 Generates narrative engineering journals from synced logs.
 
 ```bash
-python3 summary.py                    # Today's journal
+python3 summary.py                    # Quick dev journal (default)
+python3 summary.py --full             # Verbose output (file lists, prompts, principles)
 python3 summary.py --date 2026-02-10  # Specific date
 python3 summary.py --range-relative 7d  # Date range
 python3 summary.py --compact          # Quick view
@@ -120,10 +131,12 @@ python3 summary.py --prompt all       # Expand all top 5 prompts
 
 Key analysis functions:
 - `analyze_events()` — Parses all action types into per-project narratives
+- `generate_product_description()` — Turns deliverables/tasks into human-readable prose
+- `compute_vibes()` — Energy, focus, highlight, method, cost analysis
+- `rank_projects()` — Scores projects by substance, splits into expanded/collapsed
 - `group_deliverables()` — Groups files by purpose (pattern matching on paths)
 - `detect_patterns()` — Detects TDD, spec-driven, research-heavy, safety-first, parallel work
 - `analyze_top_prompts()` — Scores prompts by downstream impact
-- `analyze_slumps()` — Finds zero-output prompts
 - `extract_engineering_concepts()` — Auto-extracts engineering principles from session data
 
 ### `install.sh`
