@@ -178,6 +178,14 @@ def analyze_events(events):
         "timeline": [],
         "categories": set(),
         "has_backfill": False,
+        # Narrative fields
+        "user_intents": [],
+        "plans": [],
+        "completion_count": 0,
+        "branches": set(),
+        "sessions": set(),
+        "web_research_count": 0,
+        "research_count": 0,
     })
 
     for e in events:
@@ -186,6 +194,12 @@ def analyze_events(events):
         ts = e.get("ts", "")
         source = e.get("source", "")
 
+        # Track session and branch
+        if e.get("session"):
+            projects[project]["sessions"].add(e["session"])
+        if e.get("branch") and e["branch"] != "HEAD":
+            projects[project]["branches"].add(e["branch"])
+
         # Handle backfilled events (from history.jsonl)
         if source == "backfill" and action == "user_prompt":
             projects[project]["prompts"].append({
@@ -193,6 +207,21 @@ def analyze_events(events):
                 "time": ts,
             })
             projects[project]["has_backfill"] = True
+            if ts:
+                projects[project]["timeline"].append(ts)
+            continue
+
+        # User prompts — extract real intents
+        if action == "user_prompt":
+            prompt = e.get("prompt", "")
+            # Filter out system/command noise
+            noise = ['<command-', '<local-command-', '<task-notification>',
+                     'This session is being continued', 'Caveat: The messages']
+            if not any(skip in prompt for skip in noise):
+                projects[project]["user_intents"].append({
+                    "prompt": prompt,
+                    "time": ts,
+                })
             if ts:
                 projects[project]["timeline"].append(ts)
             continue
@@ -214,14 +243,24 @@ def analyze_events(events):
                 "time": ts,
             })
 
+        # Task planning — from both old TodoWrite and new TaskCreate
         elif action == "planned_tasks":
             tasks = e.get("tasks", [])
             completed = e.get("completed", [])
             projects[project]["tasks_planned"].extend(tasks)
             projects[project]["tasks_completed"].extend(completed)
+        elif action == "task_planned":
+            task = e.get("task", "")
+            if task:
+                projects[project]["plans"].append(task)
 
+        # Task completion — from TaskUpdate
+        elif action == "task_completed":
+            projects[project]["completion_count"] += 1
+
+        # Commands — from both old activity-logger and new sync
         elif action in ("ran_tests", "built_project", "installed_deps", "committed_code",
-                       "git_operation", "infra_operation", "ran_command"):
+                       "git_operation", "infra_operation", "ran_command", "command"):
             projects[project]["commands"].append({
                 "action": action,
                 "command": e.get("command", ""),
@@ -232,17 +271,30 @@ def analyze_events(events):
             if e.get("category"):
                 projects[project]["categories"].add(e["category"])
 
+        # Research — from both old and new formats
         elif action == "researched":
             projects[project]["research"].append({
                 "query": e.get("query", ""),
                 "time": ts,
             })
+        elif action == "research":
+            projects[project]["research_count"] += 1
+        elif action == "web_research":
+            projects[project]["web_research_count"] += 1
 
+        # Delegated work — from both old and new formats
         elif action == "delegated_task":
             projects[project]["delegated"].append({
                 "type": e.get("task_type", ""),
                 "description": e.get("task_description", ""),
                 "prompt": e.get("task_prompt", ""),
+                "time": ts,
+            })
+        elif action == "delegated":
+            projects[project]["delegated"].append({
+                "type": e.get("agent", ""),
+                "description": e.get("task", ""),
+                "prompt": e.get("task", ""),
                 "time": ts,
             })
 
@@ -252,22 +304,253 @@ def analyze_events(events):
 
     return dict(projects)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NARRATIVE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_intent(user_intents):
+    """Extract the first real user prompt as the session's intent."""
+    for intent in user_intents:
+        text = intent.get("prompt", "").strip()
+        if len(text) > 15:  # Skip very short prompts
+            # Clean up: collapse whitespace
+            text = " ".join(text.split())
+            # Strip file paths at the start to get to the human intent
+            if text.startswith("~/") or text.startswith("/"):
+                # Try multiple strategies to find the meaningful part
+                best = text
+                for sep in [' use ', ' apply ', ' and use ', ' is the ', ' - ']:
+                    idx = text.lower().find(sep)
+                    if 0 < idx < 80:
+                        candidate = text[idx + len(sep):]
+                        if len(candidate) > 20:
+                            best = candidate
+                            break
+                text = best
+                # If still starts with path after cleanup, skip to next intent
+                if text.startswith("~/") or text.startswith("/"):
+                    continue
+            if len(text) > 120:
+                text = text[:117] + "..."
+            return text
+    return None
+
+
+def extract_arc_description(data):
+    """Extract a short, meaningful description for the project arc.
+    Prioritizes what was built over raw prompts."""
+
+    # Primary: describe what was delivered (interesting groups first)
+    deliverables = group_deliverables(data.get("files_created", []))
+    if deliverables:
+        # Push generic groups to the end
+        generic = {'Documentation', 'Configuration', 'Code'}
+        groups = [g for g in deliverables if g not in generic] + \
+                 [g for g in deliverables if g in generic]
+        if len(groups) == 1:
+            desc = groups[0]
+        elif len(groups) == 2:
+            desc = f"{groups[0]} + {groups[1]}"
+        else:
+            desc = f"{groups[0]} + {groups[1]} + {len(groups)-2} more"
+        if len(desc) > 55:
+            desc = desc[:52] + "..."
+        return desc
+
+    # Secondary: describe what was modified
+    files_modified = data.get("files_modified", [])
+    if files_modified:
+        unique = list(dict.fromkeys(f["file"] for f in files_modified))
+        if len(unique) == 1:
+            return f"refined {unique[0]}"
+        return f"refined {len(unique)} files"
+
+    # Tertiary: use plans
+    if data.get("plans"):
+        plan = data["plans"][0]
+        if len(plan) > 50:
+            return plan[:50].rsplit(" ", 1)[0] + "..."
+        return plan
+
+    return "activity"
+
+
+def get_duration_str(timeline):
+    """Convert timeline to human-friendly duration string."""
+    if not timeline or len(timeline) < 2:
+        return None
+    times = sorted(timeline)
+    start, end = times[0], times[-1]
+    try:
+        # Handle HH:MM and HH:MM:SS formats
+        start_parts = start.split(":")
+        end_parts = end.split(":")
+        start_mins = int(start_parts[0]) * 60 + int(start_parts[1])
+        end_mins = int(end_parts[0]) * 60 + int(end_parts[1])
+        total = end_mins - start_mins
+        if total < 0:
+            total += 24 * 60
+        if total < 60:
+            return f"{total}m"
+        hours = total // 60
+        mins = total % 60
+        return f"{hours}h {mins}m" if mins else f"{hours}h"
+    except:
+        return None
+
+
+def get_time_range_short(timeline):
+    """Get start → end time in short format."""
+    if not timeline:
+        return "no activity", "", ""
+    times = sorted(timeline)
+    start, end = times[0], times[-1]
+    # Truncate to HH:MM
+    return f"{start[:5]} → {end[:5]}", start[:5], end[:5]
+
+
+def group_deliverables(files_created):
+    """Group created files into meaningful deliverables by purpose."""
+    groups = defaultdict(list)
+
+    # Skip temp/noise files
+    skip_patterns = ['.tmp.', 'package.tmp', '.bak', '.keep']
+
+    for f in files_created:
+        path = f.get("path", "")
+        filename = f.get("file", "")
+        category = f.get("category", "")
+
+        if not filename:
+            continue
+        if any(s in filename.lower() for s in skip_patterns):
+            continue
+
+        # Group by patterns in path and filename
+        path_lower = path.lower()
+
+        if '.storybook' in path_lower:
+            groups["Storybook setup"].append(filename)
+        elif '__tests__' in path_lower or '__test__' in path_lower:
+            groups["Test suites"].append(filename)
+        elif '__stories__' in path_lower or filename.endswith('.stories.js'):
+            groups["Component stories"].append(filename)
+        elif '/openspec/' in path_lower:
+            groups["OpenSpec artifacts"].append(filename)
+        elif '/services/' in path_lower:
+            parts = path.split('/')
+            try:
+                idx = [p.lower() for p in parts].index('services')
+                svc = parts[idx + 1] if idx + 1 < len(parts) else "service"
+                groups[f"Service: {svc}"].append(filename)
+            except ValueError:
+                groups["Services"].append(filename)
+        elif '/docs/' in path_lower:
+            groups["Documentation"].append(filename)
+        elif '/composables/' in path_lower:
+            groups["Frontend composables"].append(filename)
+        elif '/api/' in path_lower and category in ('route', 'code', 'test'):
+            groups["API layer"].append(filename)
+        elif filename.endswith('.RfxChain'):
+            groups["FX Chain presets"].append(filename.replace('.RfxChain', ''))
+        elif filename.endswith('.RTrackTemplate'):
+            groups["Track templates"].append(filename.replace('.RTrackTemplate', ''))
+        elif filename.endswith('.RPP'):
+            groups["Session templates"].append(filename)
+        elif filename.endswith('.ini'):
+            groups["Configuration"].append(filename)
+        elif filename == '.env.local':
+            groups["Configuration"].append(filename)
+        elif category == 'test' and not filename.endswith('.md'):
+            groups["Test suites"].append(filename)
+        elif category == 'config':
+            groups["Configuration"].append(filename)
+        elif category == 'component':
+            groups["Components"].append(filename)
+        elif category == 'docs' or filename.endswith('.md'):
+            groups["Documentation"].append(filename)
+        else:
+            groups["Code"].append(filename)
+
+    # Deduplicate files within groups
+    return {k: list(dict.fromkeys(v)) for k, v in groups.items()}
+
+
+def detect_patterns(data):
+    """Detect engineering patterns worth highlighting."""
+    patterns = []
+
+    files_created = data.get("files_created", [])
+    commands = data.get("commands", [])
+    plans = data.get("plans", [])
+    completion_count = data.get("completion_count", 0)
+    research_count = data.get("research_count", 0)
+    web_research_count = data.get("web_research_count", 0)
+    delegated = data.get("delegated", [])
+
+    # TDD: tests created + test commands present
+    test_files = [f for f in files_created if 'spec' in f.get("file", "").lower()
+                  or 'test' in f.get("file", "").lower()]
+    test_commands = [c for c in commands if 'test' in c.get("command", "").lower()
+                     or 'vitest' in c.get("command", "").lower()
+                     or 'jest' in c.get("command", "").lower()]
+    if test_files and test_commands:
+        patterns.append(("test_driven", f"TDD approach — {len(test_files)} test files, verified with {len(test_commands)} test runs"))
+
+    # Spec-driven: design/proposal doc files created (not test .spec.js files)
+    spec_names = set()
+    for f in files_created:
+        fname = f.get("file", "").lower()
+        fpath = f.get("path", "").lower()
+        # Only count actual design docs, not test spec files
+        is_doc = fname.endswith('.md') or '/openspec/' in fpath
+        is_design = any(s in fname for s in ['spec', 'design', 'proposal', 'playbook'])
+        if is_doc and is_design:
+            spec_names.add(fname)
+    if len(spec_names) >= 3:
+        patterns.append(("spec_driven", f"Spec-driven — designed before building ({len(spec_names)} spec artifacts)"))
+
+    # Research-heavy
+    total_research = research_count + web_research_count + len(data.get("research", []))
+    if total_research > 20:
+        patterns.append(("research_driven", f"Research-driven — {total_research} investigations before building"))
+
+    # Safety-conscious — must have actual safety tooling, not just specs
+    safety_files = [f for f in files_created if any(s in f.get("file", "").lower()
+                    for s in ['pre-commit', '.github/workflows'])]
+    safety_commands = [c for c in commands if any(s in c.get("command", "").lower()
+                       for s in ['detect-secrets', 'trufflehog', 'pre-commit'])]
+    if safety_files or safety_commands:
+        patterns.append(("safety_first", "Safety-first — secret scanning, CI pipeline, env validation"))
+
+    # Parallel delegation
+    if len(delegated) >= 3:
+        agent_types = set(d.get("type", "") for d in delegated)
+        patterns.append(("parallel_work", f"Parallelized work — delegated to {len(delegated)} agents ({', '.join(filter(None, agent_types))})"))
+
+    # Full completion
+    if plans and completion_count > 0:
+        if completion_count >= len(plans):
+            patterns.append(("all_shipped", f"All {completion_count} planned tasks shipped"))
+        else:
+            patterns.append(("progress", f"{completion_count}/{len(plans)} planned tasks completed"))
+
+    return patterns
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RENDERING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def render_project_summary(name, data):
-    """Render a single project's summary."""
+    """Render a single project's narrative summary."""
     lines = []
 
-    # Project header with work time
+    # Project header with work time and branch
     timeline = data["timeline"]
-    if timeline:
-        start = min(timeline)
-        end = max(timeline)
-        time_span = f"{start} → {end}"
-    else:
-        time_span = "no activity"
+    time_span, start_time, end_time = get_time_range_short(timeline)
+    duration = get_duration_str(timeline)
+    branches = data.get("branches", set())
 
     # Show backfill indicator
     source_label = " (from session history)" if data.get("has_backfill") else ""
@@ -275,6 +558,12 @@ def render_project_summary(name, data):
     lines.append(f"")
     lines.append(f"┌{'─' * 76}┐")
     lines.append(f"│  📁 {name:<50} [{time_span:>17}] │")
+    if branches:
+        branch_str = ", ".join(branches)
+        duration_str = f"⏱️  {duration}" if duration else ""
+        lines.append(f"│  🌿 {branch_str:<48} {duration_str:>21} │")
+    elif duration:
+        lines.append(f"│  {'':54} ⏱️  {duration:>15} │")
     if source_label:
         lines.append(f"│  {source_label:<74} │")
     lines.append(f"└{'─' * 76}┘")
@@ -293,138 +582,159 @@ def render_project_summary(name, data):
                 lines.append(f"      ... and {len(prompts) - 8} more sessions")
         return "\n".join(lines)
 
-    # What was built
+    # Intent — what the user set out to do
+    intent = extract_intent(data.get("user_intents", []))
+    if intent:
+        # Word-wrap the intent at ~60 chars for display
+        words = intent.split()
+        intent_lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line) + len(word) + 1 > 62:
+                intent_lines.append(current_line)
+                current_line = word
+            else:
+                current_line = f"{current_line} {word}" if current_line else word
+        if current_line:
+            intent_lines.append(current_line)
+        lines.append(f"")
+        lines.append(f"  💬 \"{intent_lines[0]}")
+        for il in intent_lines[1:]:
+            lines.append(f"      {il}")
+        if len(intent_lines) > 1:
+            lines[-1] += "\""
+        else:
+            lines[-1] += "\""
+
+    # Deliverables — grouped by purpose, interesting work first
     files_created = data["files_created"]
     if files_created:
+        deliverables = group_deliverables(files_created)
+        # Reorder: interesting/unique groups first, generic last
+        generic = {'Documentation', 'Configuration', 'Code'}
+        sorted_groups = [(k, v) for k, v in deliverables.items() if k not in generic] + \
+                        [(k, v) for k, v in deliverables.items() if k in generic]
         lines.append(f"")
-        lines.append(f"  🏗️  BUILT:")
-        for f in files_created[:10]:
-            category_icon = {
-                "code": "💻",
-                "frontend": "🎨",
-                "config": "⚙️",
-                "docs": "📝",
-            }.get(f.get("category", ""), "📄")
-            lines.append(f"      {category_icon} {f['file']}")
-        if len(files_created) > 10:
-            lines.append(f"      ... and {len(files_created) - 10} more files")
+        lines.append(f"  🎯 DELIVERED:")
+        for group_name, files in sorted_groups:
+            if len(files) == 1:
+                lines.append(f"      {group_name} — {files[0]}")
+            elif len(files) <= 4:
+                file_list = ", ".join(files)
+                lines.append(f"      {group_name} — {len(files)} files ({file_list})")
+            else:
+                preview = ", ".join(files[:3])
+                lines.append(f"      {group_name} — {len(files)} files ({preview}, ...)")
 
-    # What was modified
+    # Modified files — compact
     files_modified = data["files_modified"]
     if files_modified:
+        unique_files = list(dict.fromkeys(f["file"] for f in files_modified))
         lines.append(f"")
-        lines.append(f"  ✏️  MODIFIED:")
-        unique_files = list(set(f["file"] for f in files_modified))[:8]
-        for f in unique_files:
-            lines.append(f"      • {f}")
-        if len(files_modified) > 8:
-            lines.append(f"      ... and {len(set(f['file'] for f in files_modified)) - 8} more files")
+        if len(unique_files) <= 6:
+            file_list = ", ".join(unique_files)
+            lines.append(f"  ✏️  REFINED: {file_list}")
+        else:
+            preview = ", ".join(unique_files[:5])
+            lines.append(f"  ✏️  REFINED: {preview}")
+            lines.append(f"      +{len(unique_files) - 5} more files touched")
 
-    # Key operations
-    commands = data["commands"]
-    if commands:
-        lines.append(f"")
-        lines.append(f"  ⚡ OPERATIONS:")
+    # Task completion — the achievement story
+    plans = data.get("plans", [])
+    completion_count = data.get("completion_count", 0)
+    # Also check old-style tasks
+    old_completed = list(set(data.get("tasks_completed", [])))
+    old_planned = list(set(data.get("tasks_planned", [])))
 
-        # Group by type
-        by_type = defaultdict(list)
-        for c in commands:
-            by_type[c["action"]].append(c)
-
-        action_labels = {
-            "ran_tests": ("🧪", "Ran tests"),
-            "built_project": ("🔨", "Built project"),
-            "installed_deps": ("📦", "Installed dependencies"),
-            "committed_code": ("💾", "Committed code"),
-            "git_operation": ("🌿", "Git operations"),
-            "infra_operation": ("☁️", "Infrastructure"),
-            "ran_command": ("▶️", "Commands"),
-        }
-
-        for action, items in by_type.items():
-            icon, label = action_labels.get(action, ("•", action))
-            if action == "ran_command":
-                # Show interesting commands
-                for item in items[:3]:
-                    desc = item.get("description", "") or item.get("command", "")[:50]
-                    if desc:
-                        lines.append(f"      {icon} {desc}")
-            else:
-                lines.append(f"      {icon} {label} ({len(items)}x)")
-
-    # Research conducted
-    research = data["research"]
-    if research:
-        lines.append(f"")
-        lines.append(f"  🔍 RESEARCHED:")
-        for r in research[:5]:
-            query = r["query"][:60] + "..." if len(r["query"]) > 60 else r["query"]
-            lines.append(f"      • {query}")
-
-    # Tasks from todo list
-    tasks_completed = list(set(data["tasks_completed"]))
-    tasks_planned = list(set(data["tasks_planned"]))
-
-    if tasks_completed:
+    if plans and completion_count > 0:
+        if completion_count >= len(plans):
+            lines.append(f"")
+            lines.append(f"  ✅ ALL {completion_count} TASKS COMPLETED:")
+        else:
+            lines.append(f"")
+            lines.append(f"  ✅ {completion_count}/{len(plans)} TASKS COMPLETED:")
+        for p in plans:
+            lines.append(f"      ✓ {p}")
+    elif old_completed:
         lines.append(f"")
         lines.append(f"  ✅ COMPLETED:")
-        for t in tasks_completed[:8]:
+        for t in old_completed[:8]:
             lines.append(f"      ✓ {t}")
 
-    # Delegated work (agent tasks)
-    delegated = data["delegated"]
-    if delegated:
+    # Engineering patterns — the interesting bits
+    patterns = detect_patterns(data)
+    if patterns:
         lines.append(f"")
-        lines.append(f"  🤖 DELEGATED:")
-        for d in delegated[:5]:
-            desc = d.get("description", "") or d.get("type", "task")
-            lines.append(f"      → {desc}")
+        pattern_icons = {
+            "test_driven": "🧪",
+            "spec_driven": "📐",
+            "research_driven": "🔬",
+            "safety_first": "🔒",
+            "parallel_work": "⚡",
+            "all_shipped": "🚀",
+            "progress": "📊",
+        }
+        for pattern_key, description in patterns:
+            if pattern_key not in ("all_shipped", "progress"):  # Skip — already shown in tasks
+                icon = pattern_icons.get(pattern_key, "✨")
+                lines.append(f"  {icon} {description}")
 
     return "\n".join(lines)
 
 def render_day_narrative(projects, date_str):
-    """Generate a narrative summary of the day."""
+    """Generate a narrative summary of the day — the story arc."""
     lines = []
 
     total_files_created = sum(len(p["files_created"]) for p in projects.values())
     total_files_modified = sum(len(p["files_modified"]) for p in projects.values())
-    total_commands = sum(len(p["commands"]) for p in projects.values())
-    total_completed = sum(len(set(p["tasks_completed"])) for p in projects.values())
+    total_completed = sum(p.get("completion_count", 0) for p in projects.values())
+    total_completed += sum(len(set(p.get("tasks_completed", []))) for p in projects.values())
 
-    # All categories worked on
-    all_categories = set()
+    # Compute overall time span
+    all_times = []
     for p in projects.values():
-        all_categories.update(p["categories"])
+        all_times.extend(p["timeline"])
+    overall_duration = get_duration_str(all_times) if all_times else None
+    time_range, start_t, end_t = get_time_range_short(all_times)
+
+    # Count projects with real activity
+    active_projects = sum(1 for p in projects.values()
+                         if p["files_created"] or p["files_modified"] or p["plans"])
 
     lines.append("")
     lines.append("┌" + "─" * 76 + "┐")
-    lines.append("│" + " " * 28 + "📊 DAY AT A GLANCE" + " " * 30 + "│")
+    lines.append("│" + " " * 29 + "☕ TODAY'S SESSION" + " " * 30 + "│")
     lines.append("├" + "─" * 76 + "┤")
 
-    # Stats row
-    stats = f"│  {len(projects)} project(s)  •  {total_files_created} created  •  {total_files_modified} modified  •  {total_completed} tasks done"
+    # Time and overall stats
+    time_line = f"│  {time_range}"
+    if overall_duration:
+        time_line += f" · {overall_duration} of focused work"
+    time_line += " " * (77 - len(time_line)) + "│"
+    lines.append(time_line)
+
+    stats = f"│  {active_projects} project(s) delivered · {total_files_created} files built · {total_completed} tasks completed"
     stats = stats + " " * (77 - len(stats)) + "│"
     lines.append(stats)
 
     lines.append("└" + "─" * 76 + "┘")
 
-    # Work type indicators
-    if all_categories:
-        category_icons = {
-            "code": "💻 Coding",
-            "frontend": "🎨 Frontend",
-            "config": "⚙️ Config",
-            "docs": "📝 Docs",
-            "testing": "🧪 Testing",
-            "build": "🔨 Building",
-            "git": "🌿 Git",
-            "infrastructure": "☁️ Infra",
-            "dependencies": "📦 Deps",
-        }
-        work_types = [category_icons.get(c, c) for c in all_categories if c in category_icons]
-        if work_types:
-            lines.append("")
-            lines.append("  Work types: " + "  ".join(work_types))
+    # Story arc — timeline of projects
+    sorted_projects = sorted(
+        ((name, data) for name, data in projects.items()
+         if data["timeline"] and (data["files_created"] or data["files_modified"]
+                                  or data.get("plans") or data.get("user_intents"))),
+        key=lambda x: min(x[1]["timeline"])
+    )
+
+    if sorted_projects:
+        lines.append("")
+        lines.append("  📖 THE ARC:")
+
+        for name, data in sorted_projects:
+            _, proj_start, _ = get_time_range_short(data["timeline"])
+            desc = extract_arc_description(data)
+            lines.append(f"  {proj_start}  {name} — {desc}")
 
     return "\n".join(lines)
 
@@ -504,10 +814,15 @@ def render_engineering_summary(events, date_str):
     # Day narrative
     output.append(render_day_narrative(projects, date_str))
 
-    # Per-project summaries
+    # Per-project summaries — skip projects with minimal activity
     for name, data in sorted(projects.items(), key=lambda x: -len(x[1]["timeline"])):
-        if data["timeline"]:  # Only show projects with activity
+        has_substance = (data["files_created"] or data["files_modified"]
+                        or data.get("plans") or data.get("user_intents")
+                        or data.get("completion_count", 0) > 0)
+        if data["timeline"] and has_substance:
             output.append(render_project_summary(name, data))
+
+
 
     # Week view
     output.append(render_week_activity())
@@ -893,6 +1208,7 @@ def main():
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
     events = load_logs(date_str)
 
+    # Prompt deep dive
     if args.raw:
         for e in events[-20:]:
             print(json.dumps(e, indent=2))
