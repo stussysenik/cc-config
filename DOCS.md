@@ -3,11 +3,12 @@
 ## Overview
 
 This tool extracts hidden usage data from Claude Code's native logs and presents it as:
-- Daily engineering journals showing files created/modified, commands run
-- Token usage and cost estimates
-- Model breakdown (opus, sonnet, haiku)
-- Cache savings analysis
-- Subscription value comparison
+- **Narrative engineering journals** — coffee-chat-style summaries of what you built
+- **Deliverable grouping** — files organized by purpose (FX presets, API layer, Test suites)
+- **Prompt impact leaderboard** — top 5 most productive prompts with NLP keyword analysis
+- **Session insights** — most expensive prompt, friction/slumps, engineering principles learned
+- **Token & cost tracking** — usage estimates, model breakdown, cache savings
+- **Subscription value comparison** — how much value you're getting vs API pricing
 
 ## Architecture
 
@@ -46,14 +47,18 @@ Compare your API-equivalent usage to subscription tiers:
 ## Commands Reference
 
 ### `/summary`
-Today's engineering journal with costs.
+Today's narrative engineering journal.
 
 Output includes:
-- Projects worked on
-- Files created/modified
-- Commands executed
-- Tasks completed
-- Token usage and costs
+- **TODAY'S SESSION** — time span, project count, total files + tasks
+- **THE ARC** — timeline of projects with deliverable descriptions
+- **Per-project narratives** — intent quote, grouped deliverables, task completion, engineering patterns
+- **TOP PROMPTS BY IMPACT** — top 5 prompts scored by files×3 + tasks×5 + commands + delegated×4
+- **MOST EXPENSIVE PROMPT** — callout of the #1 highest-impact prompt
+- **FRICTION & SLUMPS** — zero-output prompts categorized (exploration/setup/other) + time gaps
+- **ENGINEERING PRINCIPLES** — auto-extracted concepts with PRINCIPLE → TODAY → EXTEND format
+- **THIS WEEK** — activity bar chart with streak tracking
+- **Usage Statistics** — token costs and model breakdown
 
 ### `/summary-quick`
 Compact one-line view of today's activity.
@@ -102,14 +107,24 @@ python3 sync-native-logs.py --stats 7d  # 7-day stats
 ```
 
 ### `summary.py`
-Generates daily summaries from synced logs.
+Generates narrative engineering journals from synced logs.
 
 ```bash
-python3 summary.py                    # Today
+python3 summary.py                    # Today's journal
 python3 summary.py --date 2026-02-10  # Specific date
 python3 summary.py --range-relative 7d  # Date range
 python3 summary.py --compact          # Quick view
+python3 summary.py --prompt 1         # Deep-dive into top prompt #1
+python3 summary.py --prompt all       # Expand all top 5 prompts
 ```
+
+Key analysis functions:
+- `analyze_events()` — Parses all action types into per-project narratives
+- `group_deliverables()` — Groups files by purpose (pattern matching on paths)
+- `detect_patterns()` — Detects TDD, spec-driven, research-heavy, safety-first, parallel work
+- `analyze_top_prompts()` — Scores prompts by downstream impact
+- `analyze_slumps()` — Finds zero-output prompts
+- `extract_engineering_concepts()` — Auto-extracts engineering principles from session data
 
 ### `install.sh`
 One-click installer.

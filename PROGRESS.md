@@ -1,5 +1,35 @@
 # Progress Log
 
+## 2026-02-14: Narrative Journal + Prompt Analytics + Engineering Principles
+
+### Narrative Engine
+- Rewrote `analyze_events()` to handle all sync script action types (user_prompt, task_planned, task_completed, command, research, web_research, delegated)
+- Added `extract_intent()` — extracts first meaningful user prompt, strips file paths
+- Added `group_deliverables()` — groups files by purpose (FX Chain presets, Test suites, API layer, Storybook setup, etc.) with temp file filtering and deduplication
+- Added `detect_patterns()` — TDD, spec-driven, research-heavy, safety-first, parallel work
+- Rewrote `render_project_summary()` — intent quotes, grouped deliverables, task completion story, engineering pattern badges
+- Rewrote `render_day_narrative()` — "TODAY'S SESSION" with THE ARC timeline
+
+### Prompt Analytics
+- Added `analyze_top_prompts()` — scores by files×3 + tasks×5 + commands + delegated×4
+- Added `render_top_prompts()` — leaderboard with keyword extraction and prompt style detection
+- Added `render_prompt_detail()` — `--prompt N` flag for full text, impact breakdown, keywords, stats
+- Most expensive prompt callout with comparison to average
+
+### Session Insights
+- Added `analyze_slumps()` — zero-output prompts categorized (exploration/setup/other)
+- Added `analyze_time_gaps()` — biggest pauses between events
+- Added `extract_engineering_concepts()` — auto-extracts up to 5 principles:
+  - Parallel Agent Delegation, Research-First Development, Structured Task Decomposition
+  - Version Control Discipline, Tight Test Feedback Loops, Spec-Driven Development, Iterative Refinement
+- Each principle rendered as: PRINCIPLE → TODAY (concrete example) → EXTEND (generalization)
+
+### Key Design Decisions
+- Pure Python heuristics, no LLM/DSPy — deterministic, fast, zero cost
+- Interesting deliverable groups sort first, generic (Documentation, Configuration, Code) last
+- Spec-driven detection restricted to `.md` files only (not `.spec.js` test files)
+- Safety pattern restricted to actual safety tooling files/commands only
+
 ## 2026-02-11: Enhanced Stats & Cache Tracking
 
 ### Completed

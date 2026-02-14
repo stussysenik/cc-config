@@ -70,17 +70,42 @@ After installation, use these in any Claude Code session:
 
 ### `/summary`
 ```
-📊 Wed Feb 11 — 1 project(s) | 22 created | 10 modified | 0 tasks
+┌────────────────────────────────────────────────────────────────────────────┐
+│                             ☕ TODAY'S SESSION                              │
+├────────────────────────────────────────────────────────────────────────────┤
+│  01:20 → 04:20 · 3h of focused work                                        │
+│  5 project(s) delivered · 55 files built · 19 tasks completed              │
+└────────────────────────────────────────────────────────────────────────────┘
 
-  📁 hype-commerce-swiss-tool [20:18:40→22:12:51]: 22 files
+  📖 THE ARC:
+  01:20  senik — FX Chain presets + Track templates + 3 more
+  02:37  envelope — OpenSpec artifacts + Documentation
+  03:05  envelope-exa-experiment — Test suites + API layer + 6 more
 
-────────────────────────────────────────────────────────────
-💰 Usage Statistics
-────────────────────────────────────────────────────────────
-  Today: $0.29 (824 requests)
-  Total: $114.92 | 9,357,862 tokens
-  Models: opus: $102.20 | haiku: $10.28 | sonnet: $2.45
-  Recent: 02-11: $0.29 | 02-10: $2.58 | 02-08: $0.19
+  💬 "could you help me setup the reaper ideal for fred again.."
+
+  🎯 DELIVERED:
+      FX Chain presets — 4 files (Vocal Chain, Sidechain Pump, Lo-Fi Texture, Space)
+      Track templates — 5 files
+      Session templates — Minimalist Session.RPP
+
+  ✅ ALL 8 TASKS COMPLETED
+  🔬 Research-driven — 211 investigations before building
+  ⚡ Parallelized work — delegated to 7 agents
+
+┌──────────────────────────────────────────────────────────────────┐
+│               🧠 TOP PROMPTS BY IMPACT                           │
+└──────────────────────────────────────────────────────────────────┘
+  #1  [01:43] "Design a detailed, step-by-step implementation plan..."
+      → 13 files · 16 tasks · 26 actions  (impact: 145)
+
+┌──────────────────────────────────────────────────────────────────┐
+│            🧬 TOP ENGINEERING PRINCIPLES APPLIED                  │
+└──────────────────────────────────────────────────────────────────┘
+  1. Parallel Agent Delegation
+     PRINCIPLE: Decompose large tasks into independent subtasks
+     TODAY:     Delegated 15 tasks — explored, built, validated in parallel
+     EXTEND:    Any time you have N independent subtasks, spawn N workers.
 ```
 
 ### `/summary-range 14d`
@@ -170,6 +195,10 @@ python3 ~/Desktop/cc-config/summary.py
 
 # Compact view
 python3 ~/Desktop/cc-config/summary.py --compact
+
+# Deep-dive into a top prompt (by rank 1-5 or 'all')
+python3 ~/Desktop/cc-config/summary.py --prompt 1
+python3 ~/Desktop/cc-config/summary.py --prompt all
 
 # Date range
 python3 ~/Desktop/cc-config/summary.py --range-relative 7d
