@@ -787,6 +787,516 @@ def render_week_activity(days=7):
 
     return "\n".join(lines)
 
+def analyze_top_prompts(events):
+    """Find the most impactful user prompts by output generated."""
+    NOISE = ['<command-', '<local-command-', '<task-notification>',
+             'This session is being continued', 'Caveat: The messages']
+
+    prompts_with_impact = []
+    current_prompt = None
+    current_impact = {"files": 0, "tasks": 0, "commands": 0, "delegated": 0}
+
+    # Sort events by timestamp for chronological analysis
+    sorted_events = sorted(events, key=lambda e: (e.get("session", ""), e.get("ts", "")))
+
+    for e in sorted_events:
+        action = e.get("action", "")
+
+        if action == "user_prompt":
+            # Save previous prompt's impact
+            if current_prompt:
+                total = current_impact["files"] * 3 + current_impact["tasks"] * 5 + \
+                        current_impact["commands"] + current_impact["delegated"] * 4
+                if total > 0:
+                    prompts_with_impact.append((current_prompt, dict(current_impact), total))
+
+            prompt_text = e.get("prompt", "")
+            if any(s in prompt_text for s in NOISE):
+                current_prompt = None
+                continue
+
+            current_prompt = {
+                "text": prompt_text,
+                "time": e.get("ts", ""),
+                "project": e.get("project", ""),
+            }
+            current_impact = {"files": 0, "tasks": 0, "commands": 0, "delegated": 0}
+
+        elif current_prompt:
+            if action in ("created_file", "modified_file"):
+                current_impact["files"] += 1
+            elif action in ("task_completed", "task_planned"):
+                current_impact["tasks"] += 1
+            elif action in ("command", "ran_tests", "built_project", "ran_command",
+                           "git_operation", "installed_deps"):
+                current_impact["commands"] += 1
+            elif action in ("delegated", "delegated_task"):
+                current_impact["delegated"] += 1
+
+    # Don't forget last prompt
+    if current_prompt:
+        total = current_impact["files"] * 3 + current_impact["tasks"] * 5 + \
+                current_impact["commands"] + current_impact["delegated"] * 4
+        if total > 0:
+            prompts_with_impact.append((current_prompt, dict(current_impact), total))
+
+    # Sort by impact score
+    prompts_with_impact.sort(key=lambda x: -x[2])
+    return prompts_with_impact[:5]
+
+
+def render_top_prompts(events):
+    """Render the most impactful prompts with keyword analysis."""
+    top = analyze_top_prompts(events)
+    if not top:
+        return ""
+
+    lines = []
+    lines.append("")
+    lines.append("┌" + "─" * 76 + "┐")
+    lines.append("│" + " " * 22 + "🧠 TOP PROMPTS BY IMPACT" + " " * 30 + "│")
+    lines.append("└" + "─" * 76 + "┘")
+
+    for i, (prompt, impact, score) in enumerate(top, 1):
+        text = " ".join(prompt["text"].split())
+        # Clean up paths for display
+        if text.startswith("~/") or text.startswith("/"):
+            for sep in [' use ', ' apply ', ' is the ', ' and ']:
+                idx = text.lower().find(sep)
+                if 0 < idx < 80:
+                    text = text[idx + len(sep):]
+                    break
+        if len(text) > 90:
+            text = text[:87] + "..."
+        lines.append(f"")
+        lines.append(f"  #{i}  [{prompt['time'][:5]}] {prompt['project']}")
+        lines.append(f"      \"{text}\"")
+
+        parts = []
+        if impact["files"]:
+            parts.append(f"{impact['files']} files")
+        if impact["tasks"]:
+            parts.append(f"{impact['tasks']} tasks")
+        if impact["commands"]:
+            parts.append(f"{impact['commands']} actions")
+        if impact["delegated"]:
+            parts.append(f"{impact['delegated']} delegated")
+        lines.append(f"      → {' · '.join(parts)}  (impact: {score})")
+
+    # Keyword analysis across top prompts
+    stop_words = {
+        'the', 'and', 'for', 'that', 'this', 'with', 'from', 'have', 'will',
+        'been', 'are', 'was', 'were', 'has', 'had', 'not', 'but', 'all',
+        'can', 'you', 'your', 'our', 'what', 'when', 'how', 'which', 'into',
+        'also', 'just', 'like', 'them', 'than', 'then', 'each', 'make',
+        'way', 'use', 'using', 'about', 'it\'s', 'don\'t', 'i\'m',
+        'should', 'could', 'would', 'does', 'there', 'here', 'need',
+    }
+    all_words = []
+    for prompt, _, _ in top:
+        text = prompt["text"].lower()
+        for word in text.split():
+            word = word.strip(".,!?\"'()[]{}:/~")
+            if len(word) > 3 and word not in stop_words and not word.startswith('/'):
+                all_words.append(word)
+
+    from collections import Counter
+    word_counts = Counter(all_words)
+    top_keywords = word_counts.most_common(10)
+
+    if top_keywords:
+        lines.append(f"")
+        lines.append(f"  🔑 PROMPT PATTERNS:")
+        kw_parts = [f"{word} ({count}x)" for word, count in top_keywords if count > 1]
+        if kw_parts:
+            lines.append(f"      Recurring: {' · '.join(kw_parts[:6])}")
+
+        # Detect prompt engineering patterns
+        patterns = []
+        all_text = " ".join(p["text"].lower() for p, _, _ in top)
+        if any(w in all_text for w in ['test', 'spec', 'vitest', 'jest']):
+            patterns.append("test-oriented")
+        if any(w in all_text for w in ['systematic', 'methodical', 'step']):
+            patterns.append("systematic")
+        if any(w in all_text for w in ['setup', 'install', 'configure']):
+            patterns.append("environment-focused")
+        if any(w in all_text for w in ['explain', 'walk', 'understand']):
+            patterns.append("learning-oriented")
+        if any(w in all_text for w in ['safe', 'security', 'guard']):
+            patterns.append("safety-conscious")
+        if any(w in all_text for w in ['reusable', 're-usable', 'pattern']):
+            patterns.append("pattern-thinking")
+
+        if patterns:
+            lines.append(f"      Style: {' · '.join(patterns)}")
+
+    lines.append(f"")
+    lines.append(f"  💡 Expand a prompt: python3 summary.py --prompt 1")
+
+    return "\n".join(lines)
+
+
+def render_prompt_detail(events, rank):
+    """Render full detail for a specific prompt from the leaderboard."""
+    top = analyze_top_prompts(events)
+    if not top:
+        return "\n  No prompts found for this day.\n"
+
+    if rank == "all":
+        indices = range(len(top))
+    else:
+        try:
+            idx = int(rank) - 1
+            if idx < 0 or idx >= len(top):
+                return f"\n  Invalid rank #{rank}. Available: 1–{len(top)}\n"
+            indices = [idx]
+        except ValueError:
+            return f"\n  Usage: --prompt 1  or  --prompt all\n"
+
+    output = []
+    output.append("")
+    output.append("┌" + "─" * 76 + "┐")
+    output.append("│" + " " * 22 + "🔍 PROMPT DEEP DIVE" + " " * 35 + "│")
+    output.append("└" + "─" * 76 + "┘")
+
+    for idx in indices:
+        prompt, impact, score = top[idx]
+        text = prompt["text"].strip()
+
+        output.append("")
+        output.append(f"  ━━━ #{idx + 1} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        output.append(f"  📁 {prompt['project']}  ·  🕐 {prompt['time'][:5]}  ·  Impact: {score}")
+        output.append("")
+
+        # Full prompt text, word-wrapped at ~72 chars
+        output.append("  PROMPT:")
+        words = text.split()
+        current_line = "    "
+        for word in words:
+            if len(current_line) + len(word) + 1 > 74:
+                output.append(current_line)
+                current_line = "    " + word
+            else:
+                current_line = current_line + " " + word if current_line.strip() else "    " + word
+        if current_line.strip():
+            output.append(current_line)
+
+        # Impact breakdown
+        output.append("")
+        output.append("  IMPACT:")
+        if impact["files"]:
+            output.append(f"    📄 {impact['files']} file(s) created or modified  (×3 = {impact['files'] * 3})")
+        if impact["tasks"]:
+            output.append(f"    ✅ {impact['tasks']} task(s) planned or completed  (×5 = {impact['tasks'] * 5})")
+        if impact["commands"]:
+            output.append(f"    ▶️  {impact['commands']} command(s) executed         (×1 = {impact['commands']})")
+        if impact["delegated"]:
+            output.append(f"    ⚡ {impact['delegated']} agent(s) delegated          (×4 = {impact['delegated'] * 4})")
+        output.append(f"    ─────────────────────────────────")
+        output.append(f"    Total impact score: {score}")
+
+        # Keyword extraction for this individual prompt
+        stop_words = {
+            'the', 'and', 'for', 'that', 'this', 'with', 'from', 'have', 'will',
+            'been', 'are', 'was', 'were', 'has', 'had', 'not', 'but', 'all',
+            'can', 'you', 'your', 'our', 'what', 'when', 'how', 'which', 'into',
+            'also', 'just', 'like', 'them', 'than', 'then', 'each', 'make',
+            'way', 'use', 'using', 'about', "it's", "don't", "i'm",
+            'should', 'could', 'would', 'does', 'there', 'here', 'need',
+        }
+        from collections import Counter
+        words_clean = []
+        for w in text.lower().split():
+            w = w.strip(".,!?\"'()[]{}:/~")
+            if len(w) > 3 and w not in stop_words and not w.startswith('/'):
+                words_clean.append(w)
+        word_counts = Counter(words_clean)
+        top_kw = word_counts.most_common(8)
+        if top_kw:
+            output.append("")
+            output.append("  KEYWORDS:")
+            kw_str = " · ".join(f"{w} ({c}x)" if c > 1 else w for w, c in top_kw)
+            output.append(f"    {kw_str}")
+
+        # Prompt character analysis
+        output.append("")
+        output.append("  STATS:")
+        char_count = len(text)
+        word_count = len(text.split())
+        output.append(f"    {word_count} words · {char_count} chars")
+
+    output.append("")
+    return "\n".join(output)
+
+
+def analyze_slumps(events):
+    """Find periods where prompts produced zero or minimal output — the slumps."""
+    NOISE = ['<command-', '<local-command-', '<task-notification>',
+             'This session is being continued', 'Caveat: The messages',
+             'Your task is to create a detailed summary']
+
+    sorted_events = sorted(events, key=lambda e: (e.get("session", ""), e.get("ts", "")))
+    slumps = []
+    current_prompt = None
+    impact = 0
+
+    for e in sorted_events:
+        action = e.get("action", "")
+
+        if action == "user_prompt":
+            if current_prompt and impact == 0:
+                slumps.append(current_prompt)
+            text = e.get("prompt", "")
+            if not any(s in text for s in NOISE) and len(text.strip()) > 20:
+                current_prompt = {
+                    "text": text,
+                    "time": e.get("ts", ""),
+                    "project": e.get("project", ""),
+                }
+                impact = 0
+            else:
+                current_prompt = None
+        elif current_prompt:
+            if action in ("created_file", "modified_file", "task_completed", "task_planned"):
+                impact += 1
+
+    # Last one
+    if current_prompt and impact == 0:
+        slumps.append(current_prompt)
+
+    return slumps
+
+
+def analyze_time_gaps(events):
+    """Find the biggest time gaps (potential context-switching or thinking pauses)."""
+    times = sorted(set(e.get("ts", "") for e in events if e.get("ts", "")))
+
+    def to_secs(t):
+        parts = t.split(":")
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + (int(parts[2]) if len(parts) > 2 else 0)
+
+    gaps = []
+    for i in range(1, len(times)):
+        try:
+            gap = to_secs(times[i]) - to_secs(times[i - 1])
+            if gap > 120:  # >2 min
+                gaps.append((times[i - 1], times[i], gap))
+        except:
+            pass
+
+    gaps.sort(key=lambda x: -x[2])
+    return gaps[:5]
+
+
+def extract_engineering_concepts(events):
+    """Extract top engineering concepts/principles demonstrated in today's session."""
+    from collections import Counter
+
+    concepts = []
+
+    # Gather data
+    delegated = [e for e in events if e.get("action") in ("delegated", "delegated_task")]
+    commands = [e for e in events if e.get("action") in ("command", "ran_command", "ran_tests",
+                                                          "built_project", "git_operation")]
+    research = [e for e in events if e.get("action") in ("research", "web_research")]
+    planned = [e for e in events if e.get("action") == "task_planned"]
+    completed = [e for e in events if e.get("action") == "task_completed"]
+    created = [e for e in events if e.get("action") == "created_file"]
+    git_ops = [c for c in commands if "git" in c.get("command", "").lower()]
+    test_ops = [c for c in commands if any(t in c.get("command", "").lower()
+                for t in ["test", "jest", "vitest", "pytest"])]
+
+    # 1. Parallel Delegation pattern
+    if len(delegated) >= 3:
+        agent_types = Counter(d.get("agent", d.get("task_type", "")) for d in delegated)
+        top_agent = agent_types.most_common(1)[0][0] if agent_types else "agents"
+        concepts.append({
+            "name": "Parallel Agent Delegation",
+            "principle": "Decompose large tasks into independent subtasks, run them concurrently via specialized agents",
+            "example": f"Delegated {len(delegated)} tasks (mostly to {top_agent}) — explored, built, and validated in parallel",
+            "generalize": "Any time you have N independent subtasks, spawn N workers. Applies to: CI pipelines, microservices, MapReduce, even human team coordination.",
+        })
+
+    # 2. Research-before-build
+    if len(research) > 15 and len(created) > 5:
+        concepts.append({
+            "name": "Research-First Development",
+            "principle": "Invest upfront in understanding the problem space before writing code",
+            "example": f"{len(research)} research events preceded {len(created)} files created — studied before building",
+            "generalize": "For any unfamiliar domain: read docs → prototype → build. The research:code ratio should be at least 2:1 for novel problems.",
+        })
+
+    # 3. Task decomposition & completion
+    if len(planned) >= 5 and len(completed) >= 5:
+        ratio = len(completed) / max(len(planned), 1)
+        concepts.append({
+            "name": "Structured Task Decomposition",
+            "principle": "Break work into explicit, trackable tasks with clear completion criteria",
+            "example": f"Planned {len(planned)} tasks, completed {len(completed)} ({ratio:.0%} completion rate)",
+            "generalize": "Every project benefits from explicit task lists. The act of decomposing reveals hidden complexity and prevents scope creep.",
+        })
+
+    # 4. Iterative refinement
+    modified = [e for e in events if e.get("action") == "modified_file"]
+    if len(modified) > len(created) * 2 and len(modified) > 10:
+        concepts.append({
+            "name": "Iterative Refinement Over Perfection",
+            "principle": "Ship a working version first, then refine through multiple passes",
+            "example": f"Created {len(created)} files but made {len(modified)} modifications — refined 2x+ per file on average",
+            "generalize": "First drafts are never final. Build the skeleton, then flesh it out. Applies to code, writing, design, and architecture.",
+        })
+
+    # 5. Git discipline
+    commits = [c for c in git_ops if "commit" in c.get("command", "").lower()]
+    branches = [c for c in git_ops if any(b in c.get("command", "").lower()
+                for b in ["checkout", "branch", "worktree"])]
+    if len(commits) >= 3 or len(branches) >= 2:
+        concepts.append({
+            "name": "Version Control Discipline",
+            "principle": "Commit frequently in logical units, use branches for isolation",
+            "example": f"{len(commits)} commits and {len(branches)} branch operations — kept changes atomic and reversible",
+            "generalize": "Small, frequent commits > large monolithic ones. Each commit should be a complete, working state. Branch per feature, not per day.",
+        })
+
+    # 6. Test feedback loops
+    if len(test_ops) >= 3:
+        concepts.append({
+            "name": "Tight Test Feedback Loops",
+            "principle": "Run tests frequently to catch regressions early and build confidence",
+            "example": f"Ran {len(test_ops)} test cycles during the session — verified continuously, not just at the end",
+            "generalize": "Automated tests are your safety net. Run after every meaningful change. The cost of a late-caught bug is 10x the cost of early detection.",
+        })
+
+    # 7. Spec-driven development
+    spec_files = [e for e in created if any(s in e.get("file", "").lower()
+                  for s in ["spec", "design", "proposal", "playbook"])
+                  and e.get("file", "").lower().endswith(".md")]
+    if len(spec_files) >= 2:
+        concepts.append({
+            "name": "Spec-Driven Development",
+            "principle": "Write the specification before the implementation — design the interface before the internals",
+            "example": f"Created {len(spec_files)} spec/design docs before building implementation code",
+            "generalize": "Specs force you to think about the 'what' before the 'how'. They serve as documentation, test plan, and contract all at once.",
+        })
+
+    # Sort by relevance (concepts with more evidence first)
+    return concepts[:5]
+
+
+def render_session_insights(events):
+    """Render slumps, most expensive prompt callout, and engineering concepts."""
+    output = []
+
+    # ── MOST EXPENSIVE PROMPT ──
+    top = analyze_top_prompts(events)
+    if top:
+        prompt, impact, score = top[0]
+        text = " ".join(prompt["text"].split())
+        if len(text) > 120:
+            text = text[:117] + "..."
+
+        output.append("")
+        output.append("┌" + "─" * 76 + "┐")
+        output.append("│" + " " * 19 + "💎 MOST EXPENSIVE PROMPT" + " " * 33 + "│")
+        output.append("└" + "─" * 76 + "┘")
+        output.append(f"")
+        output.append(f"  Impact score: {score}  ({impact['files']} files × 3 + {impact['tasks']} tasks × 5 + {impact['commands']} cmds + {impact['delegated']} delegated × 4)")
+        output.append(f"  📁 {prompt['project']}  ·  🕐 {prompt['time'][:5]}")
+        output.append(f"")
+
+        # Word-wrap the prompt text
+        words = text.split()
+        current = "  \""
+        for word in words:
+            if len(current) + len(word) + 1 > 74:
+                output.append(current)
+                current = "   " + word
+            else:
+                current = current + " " + word if len(current) > 3 else current + word
+        if current.strip():
+            output.append(current + "\"")
+        output.append("")
+
+        # Compare to average
+        if len(top) > 1:
+            avg_score = sum(s for _, _, s in top) / len(top)
+            ratio = score / max(avg_score, 1)
+            output.append(f"  {ratio:.1f}x the average top-5 prompt impact")
+
+    # ── SLUMPS ──
+    slumps = analyze_slumps(events)
+    gaps = analyze_time_gaps(events)
+
+    if slumps or gaps:
+        output.append("")
+        output.append("┌" + "─" * 76 + "┐")
+        output.append("│" + " " * 23 + "📉 FRICTION & SLUMPS" + " " * 33 + "│")
+        output.append("└" + "─" * 76 + "┘")
+
+    if slumps:
+        output.append(f"")
+        output.append(f"  {len(slumps)} prompt(s) produced zero file/task output:")
+        # Show top 5 most interesting slumps (longest prompts = most effort wasted)
+        sorted_slumps = sorted(slumps, key=lambda s: -len(s["text"]))[:5]
+        for s in sorted_slumps:
+            text = " ".join(s["text"].split())
+            if len(text) > 70:
+                text = text[:67] + "..."
+            output.append(f"    {s['time'][:5]}  [{s['project']}] {text}")
+
+        # Categorize the slumps
+        exploration = sum(1 for s in slumps if any(w in s["text"].lower()
+                         for w in ["check", "explore", "research", "what is", "how to", "tell me"]))
+        setup = sum(1 for s in slumps if any(w in s["text"].lower()
+                    for w in ["setup", "install", "configure", "open"]))
+        other = len(slumps) - exploration - setup
+        output.append(f"")
+        parts = []
+        if exploration:
+            parts.append(f"{exploration} exploration/research")
+        if setup:
+            parts.append(f"{setup} setup/config")
+        if other:
+            parts.append(f"{other} other")
+        output.append(f"  Breakdown: {' · '.join(parts)}")
+        output.append(f"  💡 Not all slumps are bad — exploration and research build understanding")
+
+    if gaps:
+        output.append(f"")
+        output.append(f"  Biggest pauses:")
+        for t1, t2, gap_secs in gaps[:3]:
+            mins = gap_secs // 60
+            output.append(f"    {t1[:5]} → {t2[:5]}  ({mins}m pause)")
+
+    # ── ENGINEERING CONCEPTS ──
+    concepts = extract_engineering_concepts(events)
+    if concepts:
+        output.append("")
+        output.append("┌" + "─" * 76 + "┐")
+        output.append("│" + " " * 16 + "🧬 TOP ENGINEERING PRINCIPLES APPLIED" + " " * 23 + "│")
+        output.append("└" + "─" * 76 + "┘")
+
+        for i, c in enumerate(concepts, 1):
+            output.append(f"")
+            output.append(f"  {i}. {c['name']}")
+            output.append(f"     PRINCIPLE: {c['principle']}")
+            output.append(f"     TODAY:     {c['example']}")
+            # Word-wrap the generalize text
+            gen_text = c["generalize"]
+            words = gen_text.split()
+            current = "     EXTEND:    "
+            for word in words:
+                if len(current) + len(word) + 1 > 76:
+                    output.append(current)
+                    current = "                " + word
+                else:
+                    current = current + " " + word if current.strip() else "                " + word
+            if current.strip():
+                output.append(current)
+
+    return "\n".join(output)
+
+
 def render_engineering_summary(events, date_str):
     """Generate the full engineering journal summary."""
     output = []
@@ -822,7 +1332,11 @@ def render_engineering_summary(events, date_str):
         if data["timeline"] and has_substance:
             output.append(render_project_summary(name, data))
 
+    # Top prompts analysis
+    output.append(render_top_prompts(events))
 
+    # Session insights: most expensive prompt, slumps, engineering concepts
+    output.append(render_session_insights(events))
 
     # Week view
     output.append(render_week_activity())
@@ -1131,6 +1645,7 @@ def main():
     parser.add_argument("--pick-list", action="store_true", help="Show date picker list (non-interactive)")
     parser.add_argument("--range", nargs=2, metavar=("START", "END"), help="Date range (YYYY-MM-DD YYYY-MM-DD)")
     parser.add_argument("--range-relative", help="Relative range (7d, this-week, last-month)")
+    parser.add_argument("--prompt", "-P", type=str, help="Expand a top prompt by rank (1-5) or 'all'")
 
     args = parser.parse_args()
 
@@ -1209,6 +1724,10 @@ def main():
     events = load_logs(date_str)
 
     # Prompt deep dive
+    if args.prompt:
+        print(render_prompt_detail(events, args.prompt))
+        return
+
     if args.raw:
         for e in events[-20:]:
             print(json.dumps(e, indent=2))
