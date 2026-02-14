@@ -538,6 +538,294 @@ def detect_patterns(data):
 
     return patterns
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JOURNAL HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _clean_task_name(name):
+    """Strip verbose suffixes from task names to get the product intent."""
+    import re
+    # Remove "(tasks X.X-X.X)" and "(task X.X)" suffixes
+    name = re.sub(r'\s*\(tasks?\s+[\d.,\s-]+\)\s*$', '', name)
+    # Remove procedural prefixes — we care about what, not the verb
+    name = re.sub(r'^(Implement|Create|Set up|Configure|Verify|Install|Run|Add)\s+', '', name, flags=re.IGNORECASE)
+    # Remove "Section N: " prefix
+    name = re.sub(r'^Sections?\s+[\d-]+:\s*', '', name)
+    return name.strip()
+
+
+def _truncate_word(text, limit):
+    """Truncate text at a word boundary."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit].rsplit(' ', 1)[0]
+    return truncated
+
+
+def generate_product_description(data):
+    """Generate 2-3 lines of human-readable product description from deliverables/tasks."""
+    lines = []
+
+    # Strategy 1: Use task names if available (they describe intent better)
+    plans = data.get("plans", [])
+    if plans:
+        cleaned = [_clean_task_name(p) for p in plans]
+        # Filter: discard fragments (too short, procedural, file names)
+        good = []
+        for c in cleaned:
+            if len(c) < 5:
+                continue
+            # Skip file names and paths
+            if any(ext in c for ext in ['.py', '.js', '.ts', '.json', '.toml', '.ini', '.md', '.yaml']):
+                continue
+            # Skip lowercase fragments (verb remnants after prefix stripping)
+            if c[0].islower():
+                continue
+            # Skip sentence fragments (verb phrases left after stripping)
+            if any(f' {w} ' in f' {c} ' for w in ['is', 'are', 'was', 'were', 'not', 'from', 'that']):
+                continue
+            good.append(c)
+
+        # If most tasks survived cleaning, use them. Otherwise fall through to deliverables.
+        if len(good) >= len(plans) * 0.4 and len(good) >= 2:
+            seen = set()
+            unique = []
+            for c in good:
+                key = c.lower()[:15]
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(_truncate_word(c, 45))
+
+            # Build lines by fitting tasks, staying under 55 chars per line
+            lines = []
+            current = ""
+            for task in unique:
+                candidate = f"{current}, {task}" if current else task
+                if len(candidate) > 55 and current:
+                    lines.append(current)
+                    current = task
+                else:
+                    current = candidate
+            if current:
+                lines.append(current)
+            return lines[:3]
+
+    # Strategy 2: Use deliverable group names
+    deliverables = group_deliverables(data.get("files_created", []))
+    if deliverables:
+        generic = {'Documentation', 'Configuration', 'Code'}
+        groups = [g for g in deliverables if g not in generic] + \
+                 [g for g in deliverables if g in generic]
+
+        chunks = []
+        for i in range(0, len(groups), 2):
+            pair = groups[i:i+2]
+            parts = []
+            for g in pair:
+                count = len(deliverables[g])
+                if count > 1:
+                    parts.append(f"{g} ({count})")
+                else:
+                    parts.append(g)
+            chunks.append(", ".join(parts))
+        lines = chunks[:3]
+        return lines
+
+    # Strategy 3: Describe modifications
+    files_modified = data.get("files_modified", [])
+    if files_modified:
+        unique = list(dict.fromkeys(f["file"] for f in files_modified))
+        if len(unique) <= 3:
+            return [f"Refined {', '.join(unique)}"]
+        return [f"Refined {len(unique)} files"]
+
+    return ["Activity"]
+
+
+def generate_metrics_line(data):
+    """Generate a compact metrics one-liner for a project."""
+    parts = []
+
+    plans = data.get("plans", [])
+    completion_count = data.get("completion_count", 0)
+    old_completed = list(set(data.get("tasks_completed", [])))
+    total_completed = completion_count + len(old_completed)
+
+    if plans and total_completed > 0:
+        parts.append(f"{total_completed}/{len(plans)} tasks")
+    elif total_completed > 0:
+        parts.append(f"{total_completed} tasks")
+
+    test_commands = [c for c in data.get("commands", [])
+                     if any(t in c.get("command", "").lower()
+                            for t in ["test", "vitest", "jest", "pytest"])]
+    if test_commands:
+        parts.append(f"{len(test_commands)} test runs")
+
+    delegated = data.get("delegated", [])
+    if len(delegated) >= 3:
+        parts.append(f"{len(delegated)} agents")
+
+    git_commits = [c for c in data.get("commands", [])
+                   if "commit" in c.get("command", "").lower()
+                   and c.get("action") in ("committed_code", "command", "git_operation")]
+    if git_commits:
+        parts.append(f"{len(git_commits)} commits")
+
+    if not parts:
+        created = len(data.get("files_created", []))
+        modified = len(data.get("files_modified", []))
+        if created:
+            parts.append(f"{created} files created")
+        if modified:
+            parts.append(f"{modified} modified")
+
+    return " · ".join(parts) if parts else ""
+
+
+def rank_projects(projects):
+    """Rank projects by substance. Returns (expanded_list, collapsed_list)."""
+    scored = []
+    for name, data in projects.items():
+        has_substance = (data["files_created"] or data["files_modified"]
+                        or data.get("plans") or data.get("user_intents")
+                        or data.get("completion_count", 0) > 0)
+        if not data["timeline"] or not has_substance:
+            continue
+
+        score = (len(data["files_created"]) * 2
+                 + data.get("completion_count", 0) * 3
+                 + len(set(data.get("tasks_completed", []))) * 3
+                 + len(data["timeline"]))
+        scored.append((name, data, score))
+
+    scored.sort(key=lambda x: -x[2])
+
+    expanded = [(name, data) for name, data, _ in scored[:4]]
+    collapsed = [(name, data) for name, data, _ in scored[4:]]
+    return expanded, collapsed
+
+
+def compute_vibes(projects, events, date_str):
+    """Compute the vibes section: energy, focus, highlight, method, cost."""
+    import re
+    vibes = {}
+
+    # Energy — based on time span
+    all_times = []
+    for p in projects.values():
+        all_times.extend(p["timeline"])
+    if all_times:
+        duration_str = get_duration_str(all_times)
+        times = sorted(all_times)
+        try:
+            start_parts = times[0].split(":")
+            end_parts = times[-1].split(":")
+            total_mins = (int(end_parts[0]) * 60 + int(end_parts[1])) - \
+                         (int(start_parts[0]) * 60 + int(start_parts[1]))
+            if total_mins < 0:
+                total_mins += 24 * 60
+            hours = total_mins / 60
+
+            if hours < 4:
+                label = "sprint"
+            elif hours < 8:
+                label = "solid day"
+            elif hours < 12:
+                label = "deep work"
+            else:
+                label = "marathon"
+
+            bar_filled = min(int(hours / 24 * 22), 22)
+            bar = "█" * bar_filled + "░" * (22 - bar_filled)
+            vibes["energy"] = f"{bar}  {label} ({duration_str} span)"
+        except:
+            vibes["energy"] = "unknown"
+    else:
+        vibes["energy"] = "no data"
+
+    # Focus — project count + completion
+    active = [(n, d) for n, d in projects.items()
+              if d["files_created"] or d["files_modified"] or d.get("plans")]
+    total_planned = sum(len(d.get("plans", [])) for d in projects.values())
+    total_completed = sum(d.get("completion_count", 0) for d in projects.values())
+    total_completed += sum(len(set(d.get("tasks_completed", []))) for d in projects.values())
+
+    if len(active) == 1:
+        focus = f"deep focus on {active[0][0]}"
+    elif len(active) <= 3:
+        focus = f"focused across {len(active)} projects"
+    else:
+        focus = f"scattered across {len(active)} projects"
+
+    if total_planned > 0:
+        rate = total_completed / total_planned
+        if rate >= 0.9:
+            focus += ", high completion"
+        elif rate >= 0.7:
+            focus += ", good completion"
+        elif total_completed > 0:
+            focus += f", {total_completed}/{total_planned} done"
+    vibes["focus"] = focus
+
+    # Highlight — largest project by time, described
+    if active:
+        biggest = max(active, key=lambda x: len(x[1]["timeline"]))
+        desc = extract_arc_description(biggest[1])
+        vibes["highlight"] = f"{biggest[0]} — {desc}"
+    else:
+        vibes["highlight"] = "exploring"
+
+    # Method — compressed pattern detection
+    all_patterns = []
+    for data in projects.values():
+        patterns = detect_patterns(data)
+        for key, desc in patterns:
+            all_patterns.append((key, desc))
+
+    method_parts = []
+    seen = set()
+    for key, desc in all_patterns:
+        if key in seen:
+            continue
+        seen.add(key)
+        if key == "research_driven":
+            m = re.search(r'(\d+)', desc)
+            count = m.group(1) if m else ""
+            method_parts.append(f"research-first ({count} reads)" if count else "research-first")
+        elif key == "test_driven":
+            m = re.search(r'(\d+) test runs', desc)
+            count = m.group(1) if m else ""
+            method_parts.append(f"TDD ({count} runs)" if count else "TDD")
+        elif key == "spec_driven":
+            method_parts.append("spec-driven")
+        elif key == "safety_first":
+            method_parts.append("safety-first")
+        elif key == "parallel_work":
+            method_parts.append("parallel agents")
+    vibes["method"] = ", ".join(method_parts[:3]) if method_parts else "hands-on"
+
+    # Cost — from usage stats
+    stats = load_usage_stats()
+    if stats:
+        by_date = stats.get("by_date", {})
+        if date_str in by_date:
+            day = by_date[date_str]
+            cost = f"${day['cost']:.0f}"
+            by_model = stats.get("by_model", {})
+            model_parts = []
+            for model, m_stats in sorted(by_model.items(), key=lambda x: -x[1].get("cost", 0)):
+                model_parts.append(f"{model} ${m_stats['cost']:.0f}")
+            vibes["cost"] = f"{cost} · {' / '.join(model_parts[:2])}"
+        else:
+            vibes["cost"] = "no data for today"
+    else:
+        vibes["cost"] = "no usage stats"
+
+    return vibes
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RENDERING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1297,8 +1585,162 @@ def render_session_insights(events):
     return "\n".join(output)
 
 
-def render_engineering_summary(events, date_str):
-    """Generate the full engineering journal summary."""
+def render_week_slim(days=7):
+    """Slim week chart — just bars and streak, no box header."""
+    lines = []
+    today = datetime.now()
+
+    week_data = []
+    for i in range(days - 1, -1, -1):
+        day = today - timedelta(days=i)
+        date_str = day.strftime("%Y-%m-%d")
+        day_name = day.strftime("%a")
+        events = load_logs(date_str)
+
+        meaningful = [e for e in events if e.get("action") in
+                     ("created_file", "modified_file", "committed_code", "ran_tests", "built_project")]
+        week_data.append((day_name, date_str, len(meaningful), len(events)))
+
+    max_events = max(d[2] for d in week_data) if week_data else 1
+
+    for day_name, date_str, meaningful, total in week_data:
+        if meaningful == 0 and total == 0:
+            continue  # Skip empty days
+        bar_len = int((meaningful / max(max_events, 1)) * 20)
+        bar = "█" * bar_len + "░" * (20 - bar_len)
+
+        is_today = date_str == today.strftime("%Y-%m-%d")
+        marker = "→" if is_today else " "
+
+        lines.append(f"  {marker} {day_name} │{bar}│ {meaningful:3}")
+
+    # Streak
+    streak = 0
+    for _, _, meaningful, _ in reversed(week_data):
+        if meaningful > 0:
+            streak += 1
+        else:
+            break
+
+    if streak > 1:
+        lines.append(f"  🔥 {streak}-day streak")
+
+    return "\n".join(lines)
+
+
+def render_journal(events, date_str):
+    """Generate a dev-first journal — product-focused, scannable, vibes-aware."""
+    output = []
+
+    if not events:
+        date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %b %d")
+        output.append(f"\n  cc — {date_display} · no activity\n")
+        return "\n".join(output)
+
+    projects = analyze_events(events)
+
+    # ── Header: one line ──
+    all_times = []
+    for p in projects.values():
+        all_times.extend(p["timeline"])
+    duration = get_duration_str(all_times) or "0m"
+    date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %b %d")
+
+    active_count = sum(1 for p in projects.values()
+                       if p["files_created"] or p["files_modified"] or p.get("plans"))
+
+    # Get cost for header
+    stats = load_usage_stats()
+    cost_str = ""
+    if stats:
+        by_date = stats.get("by_date", {})
+        if date_str in by_date:
+            cost_str = f" · ${by_date[date_str]['cost']:.0f}"
+
+    output.append("")
+    output.append(f"  cc — {date_display} · {duration} · {active_count} projects{cost_str}")
+
+    # ── SHIPPED ──
+    output.append("")
+    output.append(f"  SHIPPED {'═' * 45}")
+
+    expanded, collapsed = rank_projects(projects)
+
+    for name, data in expanded:
+        time_range, start_t, end_t = get_time_range_short(data["timeline"])
+        proj_duration = get_duration_str(data["timeline"])
+
+        # Project name + time range
+        name_display = name[:38]
+        time_display = time_range
+        padding = 55 - len(name_display) - len(time_display)
+        if padding < 2:
+            padding = 2
+        output.append("")
+        output.append(f"  {name_display}{' ' * padding}{time_display}")
+
+        # Branch indicator
+        branches = data.get("branches", set())
+        if branches:
+            branch_str = ", ".join(branches)
+            output.append(f"  [{branch_str}]")
+
+        # Product description (2-3 lines)
+        desc_lines = generate_product_description(data)
+        for line in desc_lines:
+            # Word-wrap at 55 chars
+            if len(line) > 55:
+                words = line.split()
+                current = ""
+                for word in words:
+                    if len(current) + len(word) + 1 > 55:
+                        output.append(f"  {current}")
+                        current = word
+                    else:
+                        current = f"{current} {word}" if current else word
+                if current:
+                    output.append(f"  {current}")
+            else:
+                output.append(f"  {line}")
+
+        # Metrics one-liner
+        metrics = generate_metrics_line(data)
+        if metrics:
+            output.append(f"  → {metrics}")
+
+    # Collapsed projects
+    if collapsed:
+        names = [name for name, _ in collapsed]
+        if len(names) <= 3:
+            names_str = ", ".join(names)
+        else:
+            names_str = ", ".join(names[:3]) + f" +{len(names)-3}"
+        output.append("")
+        output.append(f"  + {len(collapsed)} smaller sessions ({names_str})")
+
+    # ── VIBES ──
+    vibes = compute_vibes(projects, events, date_str)
+
+    output.append("")
+    output.append(f"  VIBES {'═' * 47}")
+    output.append("")
+    output.append(f"  Energy    {vibes['energy']}")
+    output.append(f"  Focus     {vibes['focus']}")
+    output.append(f"  Highlight {vibes['highlight']}")
+    output.append(f"  Method    {vibes['method']}")
+    output.append(f"  Cost      {vibes['cost']}")
+
+    # ── WEEK ──
+    output.append("")
+    output.append(f"  WEEK {'═' * 48}")
+    output.append("")
+    output.append(render_week_slim())
+
+    output.append("")
+    return "\n".join(output)
+
+
+def render_full_summary(events, date_str):
     output = []
 
     # Header
@@ -1641,6 +2083,7 @@ def main():
     parser.add_argument("--save", "-s", action="store_true", help="Save summary to file")
     parser.add_argument("--raw", "-r", action="store_true", help="Show raw log data")
     parser.add_argument("--compact", "-c", action="store_true", help="Compact quick-glance view")
+    parser.add_argument("--full", "-f", action="store_true", help="Full verbose output (old style)")
     parser.add_argument("--pick", "-p", action="store_true", help="Interactive date picker")
     parser.add_argument("--pick-list", action="store_true", help="Show date picker list (non-interactive)")
     parser.add_argument("--range", nargs=2, metavar=("START", "END"), help="Date range (YYYY-MM-DD YYYY-MM-DD)")
@@ -1671,8 +2114,10 @@ def main():
         if args.compact:
             print()
             print(render_compact_summary(events, date_str))
+        elif args.full:
+            print(render_full_summary(events, date_str))
         else:
-            print(render_engineering_summary(events, date_str))
+            print(render_journal(events, date_str))
         return
 
     # Non-interactive date picker list (for slash commands)
@@ -1738,9 +2183,13 @@ def main():
         print(render_usage_stats(date_str))
         return
 
-    summary = render_engineering_summary(events, date_str)
-    print(summary)
-    print(render_usage_stats(date_str))
+    if args.full:
+        summary = render_full_summary(events, date_str)
+        print(summary)
+        print(render_usage_stats(date_str))
+    else:
+        summary = render_journal(events, date_str)
+        print(summary)
 
     if args.save:
         SUMMARIES_DIR.mkdir(exist_ok=True)
